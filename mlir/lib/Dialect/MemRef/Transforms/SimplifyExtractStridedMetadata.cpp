@@ -726,6 +726,54 @@ class RewriteExtractAlignedPointerAsIndexOfViewLikeOp
     return success();
   }
 };
+
+template<typename ViewLikeOp>
+class RewriteViewLikeOp
+    : public OpRewritePattern<ViewLikeOp> {
+  using OpRewritePattern<ViewLikeOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(ViewLikeOp viewLikeOp,
+                  PatternRewriter &rewriter) const override {
+    // MemRef descriptor.
+    Optional<Value> memrefDesc;
+    for (OpOperand & use : llvm::make_early_inc_range(viewLikeOp->getUses())) {
+      if (isa<memref::ExtractStridedMetadataOp>(use.getOwner()))
+        continue;
+      if (!memrefDesc) {
+        IRRewriter::InsertPoint savedInsertionPoint =
+            rewriter.saveInsertionPoint();
+        rewriter.setInsertionPointAfter(viewLikeOp);
+
+        IndexType indexType = rewriter.getIndexType();
+        unsigned sourceRank = viewLikeOp.getType().getRank();
+        SmallVector<Type> sizeStrideTypes(sourceRank, indexType);
+        MemRefType viewLikeType = viewLikeOp.getType();
+
+        Location loc = viewLikeOp.getLoc();
+        auto extractStridedMetadata =
+            rewriter.create<memref::ExtractStridedMetadataOp>(
+                loc,
+                MemRefType::get({}, viewLikeType.getElementType(),
+                                MemRefLayoutAttrInterface{},
+                                viewLikeType.getMemorySpace()),
+                indexType, sizeStrideTypes, sizeStrideTypes, viewLikeOp);
+        memrefDesc = rewriter.create<memref::ReinterpretCastOp>(
+            loc, viewLikeOp.getType(),
+            extractStridedMetadata.getBaseBuffer(), extractStridedMetadata.getOffset(),
+            /*sizes=*/extractStridedMetadata.getSizes(),
+            /*strides=*/extractStridedMetadata.getStrides());
+        rewriter.restoreInsertionPoint(savedInsertionPoint);
+      }
+      // Replace that use
+      // Should we call the rewriter to notify the change?
+      use.set(*memrefDesc);
+    }
+    if (memrefDesc)
+      return success();
+    return failure();
+  }
+};
 } // namespace
 
 void memref::populateSimplifyExtractStridedMetadataOpPatterns(
@@ -739,8 +787,10 @@ void memref::populateSimplifyExtractStridedMetadataOpPatterns(
            ForwardStaticMetadata,
            ExtractStridedMetadataOpAllocFolder<memref::AllocOp>,
            ExtractStridedMetadataOpAllocFolder<memref::AllocaOp>,
-           RewriteExtractAlignedPointerAsIndexOfViewLikeOp>(
-          patterns.getContext());
+           RewriteExtractAlignedPointerAsIndexOfViewLikeOp,
+           RewriteViewLikeOp<memref::SubViewOp>,
+           RewriteViewLikeOp<memref::CollapseShapeOp>,
+           RewriteViewLikeOp<memref::ExpandShapeOp>>(patterns.getContext());
 }
 
 //===----------------------------------------------------------------------===//
