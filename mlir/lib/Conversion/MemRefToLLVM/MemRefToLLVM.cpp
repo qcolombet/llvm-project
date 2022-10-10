@@ -1684,6 +1684,10 @@ void mlir::populateMemRefToLLVMConversionPatterns(LLVMTypeConverter &converter,
       TransposeOpLowering,
       ViewOpLowering>(converter);
   // clang-format on
+  memref::populateSimplifyExtractStridedMetadataOpPatterns(patterns);
+  memref::ReinterpretCastOp::getCanonicalizationPatterns(patterns,
+                                                         patterns.getContext());
+
   // extract_strided_metadata operations produce affine.apply.
   mlir::populateAffineToStdConversionPatterns(patterns);
   // affine.apply operations produce arith operations.
@@ -1716,8 +1720,9 @@ struct MemRefToLLVMConversionPass
     if (indexBitwidth != kDeriveIndexBitwidthFromDataLayout)
       options.overrideIndexBitwidth(indexBitwidth);
 
-    // Memory descriptors are created with extract_strided_metadata
-    // operations.
+      // Memory descriptors are created with extract_strided_metadata
+      // operations.
+#if 0
     MLIRContext *ctx = &getContext();
     RewritePatternSet rewritePatterns(ctx);
     memref::populateSimplifyExtractStridedMetadataOpPatterns(rewritePatterns);
@@ -1729,6 +1734,7 @@ struct MemRefToLLVMConversionPass
     memref::ReinterpretCastOp::getCanonicalizationPatterns(cleanUpPatterns,
                                                            ctx);
     (void)applyPatternsAndFoldGreedily(op, std::move(cleanUpPatterns));
+#endif
 
     LLVMTypeConverter typeConverter(&getContext(), options,
                                     &dataLayoutAnalysis);

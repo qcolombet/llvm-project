@@ -46,19 +46,16 @@ namespace {
 /// In other words, get rid of the subview in that expression and canonicalize
 /// on its effects on the offset, the sizes, and the strides using affine.apply.
 struct ExtractStridedMetadataOpSubviewFolder
-    : public OpRewritePattern<memref::ExtractStridedMetadataOp> {
+    : public OpRewritePattern<memref::SubViewOp> {
 public:
-  using OpRewritePattern<memref::ExtractStridedMetadataOp>::OpRewritePattern;
+  using OpRewritePattern<memref::SubViewOp>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(memref::ExtractStridedMetadataOp op,
+  LogicalResult matchAndRewrite(memref::SubViewOp subview,
                                 PatternRewriter &rewriter) const override {
-    auto subview = op.getSource().getDefiningOp<memref::SubViewOp>();
-    if (!subview)
-      return failure();
 
     // Build a plain extract_strided_metadata(memref) from
-    // extract_strided_metadata(subview(memref)).
-    Location origLoc = op.getLoc();
+    // subview(memref).
+    Location origLoc = subview.getLoc();
     IndexType indexType = rewriter.getIndexType();
     Value source = subview.getSource();
     auto sourceType = source.getType().cast<MemRefType>();
@@ -67,8 +64,11 @@ public:
 
     auto newExtractStridedMetadata =
         rewriter.create<memref::ExtractStridedMetadataOp>(
-            origLoc, op.getBaseBuffer().getType(), indexType, sizeStrideTypes,
-            sizeStrideTypes, source);
+            origLoc,
+            MemRefType::get({}, sourceType.getElementType(),
+                            MemRefLayoutAttrInterface{},
+                            sourceType.getMemorySpace()),
+            indexType, sizeStrideTypes, sizeStrideTypes, source);
 
     SmallVector<int64_t> sourceStrides;
     int64_t sourceOffset;
@@ -163,7 +163,12 @@ public:
     assert(insertedDims == subRank &&
            "Should have populated all the values at this point");
 
-    rewriter.replaceOp(op, results);
+    auto memrefDesc = rewriter.create<memref::ReinterpretCastOp>(
+        origLoc, subType, newExtractStridedMetadata.getBaseBuffer(),
+        newExtractStridedMetadata.getOffset(),
+        /*sizes=*/newExtractStridedMetadata.getSizes(),
+        /*strides=*/newExtractStridedMetadata.getStrides());
+    rewriter.replaceOp(subview, memrefDesc.getResult());
     return success();
   }
 };
@@ -735,12 +740,75 @@ class RewriteViewLikeOp
   LogicalResult
   matchAndRewrite(ViewLikeOp viewLikeOp,
                   PatternRewriter &rewriter) const override {
-    // MemRef descriptor.
-    Optional<Value> memrefDesc;
+    bool needMemRefDesc = false;
+    auto createMemRefDescriptor = [&]() -> Value {
+      IRRewriter::InsertPoint savedInsertionPoint =
+          rewriter.saveInsertionPoint();
+      rewriter.setInsertionPointAfter(viewLikeOp);
+
+      Operation *source = rewriter.clone(*viewLikeOp);
+      IndexType indexType = rewriter.getIndexType();
+      MemRefType sourceType = source->getResultTypes()[0].cast<MemRefType>();
+      unsigned sourceRank = sourceType.getRank();
+      SmallVector<Type> sizeStrideTypes(sourceRank, indexType);
+
+      Location loc = source->getLoc();
+      auto extractStridedMetadata =
+          rewriter.create<memref::ExtractStridedMetadataOp>(
+              loc,
+              MemRefType::get({}, sourceType.getElementType(),
+                              MemRefLayoutAttrInterface{},
+                              sourceType.getMemorySpace()),
+              indexType, sizeStrideTypes, sizeStrideTypes,
+              source->getResults()[0]);
+      auto memrefDesc = rewriter.create<memref::ReinterpretCastOp>(
+          loc, sourceType, extractStridedMetadata.getBaseBuffer(),
+          extractStridedMetadata.getOffset(),
+          /*sizes=*/extractStridedMetadata.getSizes(),
+          /*strides=*/extractStridedMetadata.getStrides());
+      rewriter.restoreInsertionPoint(savedInsertionPoint);
+      return memrefDesc;
+    };
+
+    if (viewLikeOp.use_empty())
+      needMemRefDesc = true;
+
     for (OpOperand & use : llvm::make_early_inc_range(viewLikeOp->getUses())) {
       if (isa<memref::ExtractStridedMetadataOp>(use.getOwner()))
         continue;
-      if (!memrefDesc) {
+      needMemRefDesc = true;
+      break;
+      // Replace that use
+      // Should we call the rewriter to notify the change?
+      // use.set(getOrCreateMemRefDescriptor());
+    }
+    if (needMemRefDesc) {
+      rewriter.replaceOp(viewLikeOp, createMemRefDescriptor());
+      return success();
+    }
+    return failure();
+  }
+};
+
+class RewriteViewLikeFeedingAnyOp : public RewritePattern {
+public:
+  RewriteViewLikeFeedingAnyOp(MLIRContext *context)
+      : RewritePattern(MatchAnyOpTypeTag(), /*benefit=*/1, context) {}
+
+  LogicalResult matchAndRewrite(Operation *anyOp,
+                                PatternRewriter &rewriter) const override {
+    if (isa<memref::ExtractStridedMetadataOp>(anyOp))
+      return failure();
+    // MemRef descriptor.
+    DenseMap<Operation *, Value> viewToDescriptor;
+
+    for (unsigned i = 0, end = anyOp->getNumOperands(); i != end; ++i) {
+      auto viewLikeOp = anyOp->getOperand(i).getDefiningOp<memref::SubViewOp>();
+      if (!viewLikeOp)
+        continue;
+
+      auto descriptorIt = viewToDescriptor.find(viewLikeOp);
+      if (descriptorIt == viewToDescriptor.end()) {
         IRRewriter::InsertPoint savedInsertionPoint =
             rewriter.saveInsertionPoint();
         rewriter.setInsertionPointAfter(viewLikeOp);
@@ -758,18 +826,21 @@ class RewriteViewLikeOp
                                 MemRefLayoutAttrInterface{},
                                 viewLikeType.getMemorySpace()),
                 indexType, sizeStrideTypes, sizeStrideTypes, viewLikeOp);
-        memrefDesc = rewriter.create<memref::ReinterpretCastOp>(
-            loc, viewLikeOp.getType(),
-            extractStridedMetadata.getBaseBuffer(), extractStridedMetadata.getOffset(),
+        auto memrefDesc = rewriter.create<memref::ReinterpretCastOp>(
+            loc, viewLikeOp.getType(), extractStridedMetadata.getBaseBuffer(),
+            extractStridedMetadata.getOffset(),
             /*sizes=*/extractStridedMetadata.getSizes(),
             /*strides=*/extractStridedMetadata.getStrides());
         rewriter.restoreInsertionPoint(savedInsertionPoint);
+        auto insertedPair =
+            viewToDescriptor.try_emplace(viewLikeOp, memrefDesc);
+        assert(insertedPair.second && "Insertion should have worked");
+        descriptorIt = insertedPair.first;
       }
-      // Replace that use
-      // Should we call the rewriter to notify the change?
-      use.set(*memrefDesc);
+      rewriter.updateRootInPlace(
+          anyOp, [&]() { anyOp->setOperand(i, (descriptorIt->second)); });
     }
-    if (memrefDesc)
+    if (!viewToDescriptor.empty())
       return success();
     return failure();
   }
@@ -784,13 +855,15 @@ void memref::populateSimplifyExtractStridedMetadataOpPatterns(
                memref::ExpandShapeOp, getExpandedSizes, getExpandedStrides>,
            ExtractStridedMetadataOpReshapeFolder<
                memref::CollapseShapeOp, getCollapsedSize, getCollapsedStride>,
-           ForwardStaticMetadata,
+           // ForwardStaticMetadata,
            ExtractStridedMetadataOpAllocFolder<memref::AllocOp>,
            ExtractStridedMetadataOpAllocFolder<memref::AllocaOp>,
-           RewriteExtractAlignedPointerAsIndexOfViewLikeOp,
-           RewriteViewLikeOp<memref::SubViewOp>,
-           RewriteViewLikeOp<memref::CollapseShapeOp>,
-           RewriteViewLikeOp<memref::ExpandShapeOp>>(patterns.getContext());
+           RewriteExtractAlignedPointerAsIndexOfViewLikeOp
+           // RewriteViewLikeFeedingAnyOp
+           // RewriteViewLikeOp<memref::SubViewOp>
+           // RewriteViewLikeOp<memref::CollapseShapeOp>,
+           // RewriteViewLikeOp<memref::ExpandShapeOp>
+           >(patterns.getContext());
 }
 
 //===----------------------------------------------------------------------===//
