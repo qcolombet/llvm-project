@@ -1240,6 +1240,34 @@ void ExtractAlignedPointerAsIndexOp::getAsmResultNames(
 // ExtractStridedMetadataOp
 //===----------------------------------------------------------------------===//
 
+/// Helper function to perform the replacement of all constant uses of `values`
+/// by a materialized constant extracted from `maybeConstants`.
+/// `values` and `maybeConstants` are expected to have the same size.
+template <typename Container>
+static bool replaceConstantUsesOf(OpBuilder &rewriter, Location loc,
+                                  Container values,
+                                  ArrayRef<int64_t> maybeConstants,
+                                  llvm::function_ref<bool(int64_t)> isDynamic) {
+  assert(values.size() == maybeConstants.size() &&
+         " expected values and maybeConstants of the same size");
+  bool atLeastOneReplacement = false;
+  for (auto [maybeConstant, result] : llvm::zip(maybeConstants, values)) {
+    // Don't materialize a constant if there are no uses: this would indice
+    // infinite loops in the driver.
+    if (isDynamic(maybeConstant) || result.use_empty())
+      continue;
+    Value constantVal =
+        rewriter.create<arith::ConstantIndexOp>(loc, maybeConstant);
+    for (Operation *op : llvm::make_early_inc_range(result.getUsers())) {
+      // updateRootInplace: lambda cannot capture structured bindings in C++17
+      // yet.
+      op->replaceUsesOfWith(result, constantVal);
+      atLeastOneReplacement = true;
+    }
+  }
+  return atLeastOneReplacement;
+}
+
 void ExtractStridedMetadataOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
   setNameFn(getBaseBuffer(), "base_buffer");
@@ -1250,6 +1278,30 @@ void ExtractStridedMetadataOp::getAsmResultNames(
     setNameFn(getSizes().front(), "sizes");
     setNameFn(getStrides().front(), "strides");
   }
+}
+
+LogicalResult
+ExtractStridedMetadataOp::fold(ArrayRef<Attribute> cstOperands,
+                               SmallVectorImpl<OpFoldResult> &results) {
+  OpBuilder builder(*this);
+  auto memrefType = getSource().getType().cast<MemRefType>();
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  LogicalResult res = getStridesAndOffset(memrefType, strides, offset);
+  (void)res;
+  assert(succeeded(res) && "must be a strided memref type");
+
+  bool atLeastOneReplacement = replaceConstantUsesOf(
+      builder, getLoc(), ArrayRef<TypedValue<IndexType>>(getOffset()),
+      ArrayRef<int64_t>(offset), ShapedType::isDynamicStrideOrOffset);
+  atLeastOneReplacement |=
+      replaceConstantUsesOf(builder, getLoc(), getSizes(),
+                            memrefType.getShape(), ShapedType::isDynamic);
+  atLeastOneReplacement |=
+      replaceConstantUsesOf(builder, getLoc(), getStrides(), strides,
+                            ShapedType::isDynamicStrideOrOffset);
+
+  return success(atLeastOneReplacement);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1694,6 +1746,32 @@ OpFoldResult ReinterpretCastOp::fold(ArrayRef<Attribute> /*operands*/) {
   return nullptr;
 }
 
+static bool sameValueOrConstant(Value A, int64_t constantA, Value B,
+                                int64_t constantB,
+                                llvm::function_ref<bool(int64_t)> isDynamic) {
+  if (A == B)
+    return true;
+  Optional<int64_t> maybeConstantA =
+      isDynamic(constantA) ? getConstantIntValue(A) : constantA;
+  Optional<int64_t> maybeConstantB =
+      isDynamic(constantB) ? getConstantIntValue(B) : constantB;
+  if (!maybeConstantA || !maybeConstantB)
+    return false;
+  return *maybeConstantA == *maybeConstantB;
+}
+
+static bool
+sameValueOrConstantAtIdx(ValueRange valuesA, ArrayRef<int64_t> constantsA,
+                         ValueRange valuesB, ArrayRef<int64_t> constantsB,
+                         llvm::function_ref<bool(int64_t)> isDynamic,
+                         unsigned idx) {
+  Value A = valuesA[idx];
+  Value B = valuesB[idx];
+  int64_t constantA = constantsA[idx];
+  int64_t constantB = constantsB[idx];
+  return sameValueOrConstant(A, constantA, B, constantB, isDynamic);
+}
+
 namespace {
 /// Replace reinterpret_cast(extract_strided_metadata memref) -> memref.
 struct ReinterpretCastOpExtractStridedMetadataFolder
@@ -1713,22 +1791,51 @@ public:
     // First, check that the strides are the same.
     if (extractStridedMetadata.getStrides().size() != op.getStrides().size())
       return failure();
-    for (auto [extractStride, reinterpretStride] :
-         llvm::zip(extractStridedMetadata.getStrides(), op.getStrides()))
-      if (extractStride != reinterpretStride)
+
+    SmallVector<int64_t> reinterpretStrides;
+    int64_t reinterpretOffset;
+    bool hasKnownStridesAndOffset = succeeded(getStridesAndOffset(
+        op.getType(), reinterpretStrides, reinterpretOffset));
+    (void)hasKnownStridesAndOffset;
+    assert(hasKnownStridesAndOffset &&
+           "getStridesAndOffset must work on valid reinterpret_cast");
+    SmallVector<int64_t> extractStrides;
+    int64_t extractOffset;
+    auto sourceType =
+        extractStridedMetadata.getSource().getType().cast<MemRefType>();
+    hasKnownStridesAndOffset = succeeded(
+        getStridesAndOffset(extractStridedMetadata.getSource().getType(),
+                            extractStrides, extractOffset));
+    (void)hasKnownStridesAndOffset;
+    assert(hasKnownStridesAndOffset && "getStridesAndOffset must work on valid "
+                                       "extract_strided_metadata source");
+
+    unsigned rank = op.getType().getRank();
+    for (unsigned i = 0; i < rank; ++i) {
+      if (!sameValueOrConstantAtIdx(extractStridedMetadata.getStrides(),
+                                    extractStrides, op.getStrides(),
+                                    reinterpretStrides,
+                                    ShapedType::isDynamicStrideOrOffset, i))
         return failure();
+    }
 
     // Second, check the sizes.
-    if (extractStridedMetadata.getSizes().size() != op.getSizes().size())
-      return failure();
-    for (auto [extractSize, reinterpretSize] :
-         llvm::zip(extractStridedMetadata.getSizes(), op.getSizes()))
-      if (extractSize != reinterpretSize)
-        return failure();
+    assert(extractStridedMetadata.getSizes().size() == op.getSizes().size() &&
+           "Strides and sizes rank must match");
+    ArrayRef<int64_t> reinterpretSizes = op.getType().getShape();
+    ArrayRef<int64_t> extractSizes = sourceType.getShape();
+    for (unsigned i = 0; i < rank; ++i) {
+      if (!sameValueOrConstantAtIdx(extractStridedMetadata.getSizes(),
+                                    extractSizes, op.getSizes(),
+                                    reinterpretSizes, ShapedType::isDynamic, i))
 
+        return failure();
+    }
     // Finally, check the offset.
-    if (op.getOffsets().size() != 1 &&
-        extractStridedMetadata.getOffset() != *op.getOffsets().begin())
+    if (op.getOffsets().size() != 1 ||
+        !sameValueOrConstant(extractStridedMetadata.getOffset(), extractOffset,
+                             *op.getOffsets().begin(), reinterpretOffset,
+                             ShapedType::isDynamicStrideOrOffset))
       return failure();
 
     // At this point, we know that the back and forth between extract strided
