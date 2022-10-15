@@ -566,7 +566,7 @@ def ConvertMathToFuncs : Pass<"convert-math-to-funcs", "ModuleOp"> {
 def MemRefToLLVMConversionPass : Pass<"convert-memref-to-llvm", "ModuleOp"> {
   let summary = "Convert operations from the MemRef dialect to the LLVM "
                 "dialect";
-  let dependentDialects = ["LLVM::LLVMDialect"];
+  let dependentDialects = ["LLVM::LLVMDialect", "AffineDialect"];
   let options = [
     Option<"useAlignedAlloc", "use-aligned-alloc", "bool", /*default=*/"false",
            "Use aligned_alloc in place of malloc for heap allocations">,
