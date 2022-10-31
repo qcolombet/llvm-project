@@ -1778,8 +1778,8 @@ void ReinterpretCastOp::build(OpBuilder &b, OperationState &result,
   dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides,
                              ShapedType::kDynamicStrideOrOffset);
   build(b, result, resultType, source, dynamicOffsets, dynamicSizes,
-        dynamicStrides, b.getI64ArrayAttr(staticOffsets),
-        b.getI64ArrayAttr(staticSizes), b.getI64ArrayAttr(staticStrides));
+        dynamicStrides, b.getIndexArrayAttr(staticOffsets),
+        b.getIndexArrayAttr(staticSizes), b.getIndexArrayAttr(staticStrides));
   result.addAttributes(attrs);
 }
 
@@ -1790,13 +1790,13 @@ void ReinterpretCastOp::build(OpBuilder &b, OperationState &result,
                               ArrayRef<NamedAttribute> attrs) {
   SmallVector<OpFoldResult> sizeValues =
       llvm::to_vector<4>(llvm::map_range(sizes, [&](int64_t v) -> OpFoldResult {
-        return b.getI64IntegerAttr(v);
+        return b.getIndexAttr(v);
       }));
   SmallVector<OpFoldResult> strideValues = llvm::to_vector<4>(
       llvm::map_range(strides, [&](int64_t v) -> OpFoldResult {
-        return b.getI64IntegerAttr(v);
+        return b.getIndexAttr(v);
       }));
-  build(b, result, resultType, source, b.getI64IntegerAttr(offset), sizeValues,
+  build(b, result, resultType, source, b.getIndexAttr(offset), sizeValues,
         strideValues, attrs);
 }
 
@@ -2659,8 +2659,8 @@ void SubViewOp::build(OpBuilder &b, OperationState &result,
                      .cast<MemRefType>();
   }
   build(b, result, resultType, source, dynamicOffsets, dynamicSizes,
-        dynamicStrides, b.getI64ArrayAttr(staticOffsets),
-        b.getI64ArrayAttr(staticSizes), b.getI64ArrayAttr(staticStrides));
+        dynamicStrides, b.getIndexArrayAttr(staticOffsets),
+        b.getIndexArrayAttr(staticSizes), b.getIndexArrayAttr(staticStrides));
   result.addAttributes(attrs);
 }
 
@@ -2681,15 +2681,15 @@ void SubViewOp::build(OpBuilder &b, OperationState &result, Value source,
                       ArrayRef<NamedAttribute> attrs) {
   SmallVector<OpFoldResult> offsetValues = llvm::to_vector<4>(
       llvm::map_range(offsets, [&](int64_t v) -> OpFoldResult {
-        return b.getI64IntegerAttr(v);
+        return b.getIndexAttr(v);
       }));
   SmallVector<OpFoldResult> sizeValues =
       llvm::to_vector<4>(llvm::map_range(sizes, [&](int64_t v) -> OpFoldResult {
-        return b.getI64IntegerAttr(v);
+        return b.getIndexAttr(v);
       }));
   SmallVector<OpFoldResult> strideValues = llvm::to_vector<4>(
       llvm::map_range(strides, [&](int64_t v) -> OpFoldResult {
-        return b.getI64IntegerAttr(v);
+        return b.getIndexAttr(v);
       }));
   build(b, result, source, offsetValues, sizeValues, strideValues, attrs);
 }
@@ -2703,15 +2703,15 @@ void SubViewOp::build(OpBuilder &b, OperationState &result,
                       ArrayRef<NamedAttribute> attrs) {
   SmallVector<OpFoldResult> offsetValues = llvm::to_vector<4>(
       llvm::map_range(offsets, [&](int64_t v) -> OpFoldResult {
-        return b.getI64IntegerAttr(v);
+        return b.getIndexAttr(v);
       }));
   SmallVector<OpFoldResult> sizeValues =
       llvm::to_vector<4>(llvm::map_range(sizes, [&](int64_t v) -> OpFoldResult {
-        return b.getI64IntegerAttr(v);
+        return b.getIndexAttr(v);
       }));
   SmallVector<OpFoldResult> strideValues = llvm::to_vector<4>(
       llvm::map_range(strides, [&](int64_t v) -> OpFoldResult {
-        return b.getI64IntegerAttr(v);
+        return b.getIndexAttr(v);
       }));
   build(b, result, resultType, source, offsetValues, sizeValues, strideValues,
         attrs);

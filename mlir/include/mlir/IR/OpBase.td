@@ -1467,6 +1467,10 @@ def I64ArrayAttr : TypedArrayAttrBase<I64Attr,
                                       "64-bit integer array attribute"> {
   let constBuilderCall = "$_builder.getI64ArrayAttr($0)";
 }
+def IndexArrayAttr : TypedArrayAttrBase<IndexAttr,
+                                      "Index array attribute"> {
+  let constBuilderCall = "$_builder.getIndexArrayAttr($0)";
+}
 // Variant of I64ArrayAttr whose user accessor is SmallVector<in64_t>.
 def I64SmallVectorArrayAttr :
     TypedArrayAttrBase<I64Attr, "64-bit integer array attribute"> {

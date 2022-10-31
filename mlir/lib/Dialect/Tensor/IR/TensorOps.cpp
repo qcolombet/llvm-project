@@ -1609,8 +1609,8 @@ void ExtractSliceOp::build(OpBuilder &b, OperationState &result,
             .cast<RankedTensorType>();
   }
   build(b, result, resultType, source, dynamicOffsets, dynamicSizes,
-        dynamicStrides, b.getI64ArrayAttr(staticOffsets),
-        b.getI64ArrayAttr(staticSizes), b.getI64ArrayAttr(staticStrides));
+        dynamicStrides, b.getIndexArrayAttr(staticOffsets),
+        b.getIndexArrayAttr(staticSizes), b.getIndexArrayAttr(staticStrides));
   result.addAttributes(attrs);
 }
 
@@ -2020,8 +2020,8 @@ void InsertSliceOp::build(OpBuilder &b, OperationState &result, Value source,
   dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides,
                              ShapedType::kDynamicStrideOrOffset);
   build(b, result, dest.getType(), source, dest, dynamicOffsets, dynamicSizes,
-        dynamicStrides, b.getI64ArrayAttr(staticOffsets),
-        b.getI64ArrayAttr(staticSizes), b.getI64ArrayAttr(staticStrides));
+        dynamicStrides, b.getIndexArrayAttr(staticOffsets),
+        b.getIndexArrayAttr(staticSizes), b.getIndexArrayAttr(staticStrides));
   result.addAttributes(attrs);
 }
 
@@ -2452,8 +2452,8 @@ void PadOp::build(OpBuilder &b, OperationState &result, Value source,
                   ArrayRef<NamedAttribute> attrs) {
   auto sourceType = source.getType().cast<RankedTensorType>();
   auto resultType = inferResultType(sourceType, staticLow, staticHigh);
-  build(b, result, resultType, source, low, high, b.getI64ArrayAttr(staticLow),
-        b.getI64ArrayAttr(staticHigh), nofold ? b.getUnitAttr() : UnitAttr());
+  build(b, result, resultType, source, low, high, b.getIndexArrayAttr(staticLow),
+        b.getIndexArrayAttr(staticHigh), nofold ? b.getUnitAttr() : UnitAttr());
   result.addAttributes(attrs);
 }
 
@@ -2487,7 +2487,7 @@ void PadOp::build(OpBuilder &b, OperationState &result, Type resultType,
   }
   assert(resultType.isa<RankedTensorType>());
   build(b, result, resultType, source, dynamicLow, dynamicHigh,
-        b.getI64ArrayAttr(staticLow), b.getI64ArrayAttr(staticHigh),
+        b.getIndexArrayAttr(staticLow), b.getIndexArrayAttr(staticHigh),
         nofold ? b.getUnitAttr() : UnitAttr());
   result.addAttributes(attrs);
 }
@@ -2836,8 +2836,8 @@ void ParallelInsertSliceOp::build(OpBuilder &b, OperationState &result,
   dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides,
                              ShapedType::kDynamicStrideOrOffset);
   build(b, result, {}, source, dest, dynamicOffsets, dynamicSizes,
-        dynamicStrides, b.getI64ArrayAttr(staticOffsets),
-        b.getI64ArrayAttr(staticSizes), b.getI64ArrayAttr(staticStrides));
+        dynamicStrides, b.getIndexArrayAttr(staticOffsets),
+        b.getIndexArrayAttr(staticSizes), b.getIndexArrayAttr(staticStrides));
   result.addAttributes(attrs);
 }
 

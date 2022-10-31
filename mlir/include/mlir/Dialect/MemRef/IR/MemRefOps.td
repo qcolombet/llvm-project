@@ -1260,9 +1260,9 @@ def MemRef_ReinterpretCastOp
                        Variadic<Index>:$offsets,
                        Variadic<Index>:$sizes,
                        Variadic<Index>:$strides,
-                       I64ArrayAttr:$static_offsets,
-                       I64ArrayAttr:$static_sizes,
-                       I64ArrayAttr:$static_strides);
+                       IndexArrayAttr:$static_offsets,
+                       IndexArrayAttr:$static_sizes,
+                       IndexArrayAttr:$static_strides);
   let results = (outs AnyMemRef:$result);
 
   let assemblyFormat = [{
@@ -1858,9 +1858,9 @@ def SubViewOp : MemRef_OpWithOffsetSizesAndStrides<"subview", [
                        Variadic<Index>:$offsets,
                        Variadic<Index>:$sizes,
                        Variadic<Index>:$strides,
-                       I64ArrayAttr:$static_offsets,
-                       I64ArrayAttr:$static_sizes,
-                       I64ArrayAttr:$static_strides);
+                       IndexArrayAttr:$static_offsets,
+                       IndexArrayAttr:$static_sizes,
+                       IndexArrayAttr:$static_strides);
   let results = (outs AnyMemRef:$result);
 
   let assemblyFormat = [{
