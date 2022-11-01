@@ -122,7 +122,7 @@ ParseResult mlir::parseDynamicIndexList(
       return failure();
     break;
   }
-  integers = parser.getBuilder().getIndexArrayAttr(attrVals);
+  integers = parser.getBuilder().getI64ArrayAttr(attrVals);
   return success();
 }
 
@@ -189,7 +189,7 @@ mlir::decomposeMixedValues(Builder &b,
       dynamicValues.push_back(it.get<Value>());
     }
   }
-  return {b.getIndexArrayAttr(staticValues), dynamicValues};
+  return {b.getI64ArrayAttr(staticValues), dynamicValues};
 }
 
 std::pair<ArrayAttr, SmallVector<Value>> mlir::decomposeMixedStridesOrOffsets(

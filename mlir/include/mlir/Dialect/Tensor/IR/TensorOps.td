@@ -326,9 +326,9 @@ def Tensor_ExtractSliceOp : Tensor_OpWithOffsetSizesAndStrides<"extract_slice", 
     Variadic<Index>:$offsets,
     Variadic<Index>:$sizes,
     Variadic<Index>:$strides,
-    IndexArrayAttr:$static_offsets,
-    IndexArrayAttr:$static_sizes,
-    IndexArrayAttr:$static_strides
+    I64ArrayAttr:$static_offsets,
+    I64ArrayAttr:$static_sizes,
+    I64ArrayAttr:$static_strides
   );
   let results = (outs AnyRankedTensor:$result);
 
@@ -810,9 +810,9 @@ def Tensor_InsertSliceOp : Tensor_OpWithOffsetSizesAndStrides<"insert_slice", [
     Variadic<Index>:$offsets,
     Variadic<Index>:$sizes,
     Variadic<Index>:$strides,
-    IndexArrayAttr:$static_offsets,
-    IndexArrayAttr:$static_sizes,
-    IndexArrayAttr:$static_strides
+    I64ArrayAttr:$static_offsets,
+    I64ArrayAttr:$static_sizes,
+    I64ArrayAttr:$static_strides
   );
   let results = (outs AnyRankedTensor:$result);
 
@@ -1209,8 +1209,8 @@ def Tensor_PadOp : Tensor_Op<"pad", [
     AnyTensor:$source,
     Variadic<Index>:$low,
     Variadic<Index>:$high,
-    IndexArrayAttr:$static_low,
-    IndexArrayAttr:$static_high,
+    I64ArrayAttr:$static_low,
+    I64ArrayAttr:$static_high,
     UnitAttr:$nofold);
 
   let regions = (region SizedRegion<1>:$region);
@@ -1405,9 +1405,9 @@ def Tensor_ParallelInsertSliceOp : Tensor_Op<"parallel_insert_slice", [
     Variadic<Index>:$offsets,
     Variadic<Index>:$sizes,
     Variadic<Index>:$strides,
-    IndexArrayAttr:$static_offsets,
-    IndexArrayAttr:$static_sizes,
-    IndexArrayAttr:$static_strides
+    I64ArrayAttr:$static_offsets,
+    I64ArrayAttr:$static_sizes,
+    I64ArrayAttr:$static_strides
   );
   let assemblyFormat = [{
     $source `into` $dest ``
