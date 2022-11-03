@@ -1975,6 +1975,7 @@ public:
     results.reserve(2 + rank * 2);
 
     // Base buffer.
+    // need to create a struct with base, allocated, offset == 0.
     results.push_back(sourceMemRef.allocatedPtr(rewriter, loc));
 
     // Offset.
