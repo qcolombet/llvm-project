@@ -15,6 +15,7 @@
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -22,6 +23,8 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/TypeSwitch.h"
+
+#include "llvm/Support/Debug.h"
 
 namespace mlir {
 namespace memref {
@@ -244,6 +247,16 @@ public:
                                 PatternRewriter &rewriter) const override;
 };
 
+/// Merges subview operation with load/transferRead operation.
+template <typename OpTy>
+class LoadOpOfConstructStridedMetadataOpFolder final
+    : public OpRewritePattern<OpTy> {
+public:
+  using OpRewritePattern<OpTy>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(OpTy loadOp,
+                                PatternRewriter &rewriter) const override;
+};
 /// Merges expand_shape operation with load/transferRead operation.
 template <typename OpTy>
 class LoadOpOfExpandShapeOpFolder final : public OpRewritePattern<OpTy> {
@@ -264,6 +277,15 @@ public:
                                 PatternRewriter &rewriter) const override;
 };
 
+template <typename OpTy>
+class StoreOpOfConstructStridedMetadataOpFolder final
+    : public OpRewritePattern<OpTy> {
+public:
+  using OpRewritePattern<OpTy>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(OpTy loadOp,
+                                PatternRewriter &rewriter) const override;
+};
 /// Merges subview operation with store/transferWriteOp operation.
 template <typename OpTy>
 class StoreOpOfSubViewOpFolder final : public OpRewritePattern<OpTy> {
@@ -413,6 +435,180 @@ LogicalResult LoadOpOfCollapseShapeOpFolder<OpTy>::matchAndRewrite(
   return success();
 }
 
+/// Given the 'indices' of an load/store operation where the memref is a result
+/// of a subview op, returns the indices w.r.t to the source memref of the
+/// subview op. For example
+///
+/// %0 = ... : memref<12x42xf32>
+/// %1 = subview %0[%arg0, %arg1][][%stride1, %stride2] : memref<12x42xf32> to
+///          memref<4x4xf32, offset=?, strides=[?, ?]>
+/// %2 = load %1[%i1, %i2] : memref<4x4xf32, offset=?, strides=[?, ?]>
+///
+/// could be folded into
+///
+/// %2 = load %0[%arg0 + %i1 * %stride1][%arg1 + %i2 * %stride2] :
+///          memref<12x42xf32>
+static LogicalResult
+resolveSourceIndicesConstructStridedMetadata(Location loc, PatternRewriter &rewriter,
+                            memref::ConstructStridedMetadataOp subViewOp, ValueRange indices,
+                            SmallVectorImpl<Value> &sourceIndices) {
+  SmallVector<OpFoldResult> mixedStrides = subViewOp.getMixedStrides();
+
+  if (indices.size() != mixedStrides.size())
+    return failure();
+  unsigned rank = subViewOp.getResultRank();
+  SmallVector<OpFoldResult> values(2 * rank + 1);
+  SmallVector<AffineExpr> symbols(2 * rank + 1);
+
+  detail::bindSymbolsList(rewriter.getContext(), symbols);
+  AffineExpr expr = symbols.front();
+  values[0] = subViewOp.getMixedOffsets().empty()
+                  ? rewriter.getIndexAttr(0)
+                  : subViewOp.getMixedOffsets()[0];
+  for (unsigned i = 0; i < rank; ++i) {
+    // Build up the computation of the offset.
+    unsigned baseIdxForDim = 1 + 2 * i;
+    unsigned sourceIndexForDim = baseIdxForDim;
+    unsigned origStrideForDim = baseIdxForDim + 1;
+    expr = expr + symbols[sourceIndexForDim] * symbols[origStrideForDim];
+    values[sourceIndexForDim] = indices[i];
+    values[origStrideForDim] = mixedStrides[i];
+  }
+
+  // Compute the offset.
+  OpFoldResult flattenedOffset =
+      makeComposedFoldedAffineApply(rewriter, subViewOp.getLoc(), expr, values);
+  assert(sourceIndices.empty() && "Source indices should be populated here");
+  sourceIndices.push_back(
+      getValueOrCreateConstantIndexOp(rewriter, loc, flattenedOffset));
+
+  return success();
+}
+
+Value getLoadStoreSourceFromConstructStridedMetadata(PatternRewriter &rewriter,
+    memref::ConstructStridedMetadataOp subViewOp) {
+  OpFoldResult finalSize = rewriter.getIndexAttr(1);
+  unsigned rank = subViewOp.getResultRank();
+  SmallVector<OpFoldResult> values(rank + 1);
+  SmallVector<AffineExpr> symbols(rank + 1);
+
+  detail::bindSymbolsList(rewriter.getContext(), symbols);
+  AffineExpr expr = symbols.front();
+
+  values[0] = rewriter.getIndexAttr(1);
+  SmallVector<OpFoldResult> mixedSizes = subViewOp.getMixedSizes();
+  for (unsigned i = 0; i < rank; ++i) {
+    expr = expr * symbols[i + 1];
+    values[i + 1] = mixedSizes[i];
+  }
+
+  // Compute the offset.
+  OpFoldResult flattenedSize =
+      makeComposedFoldedAffineApply(rewriter, subViewOp.getLoc(), expr, values);
+  MemRefType subViewType = subViewOp.getType();
+  Type eltType = subViewType.getElementType();
+  MemRefType finalType =
+      flattenedSize.is<Value>()
+          ? MemRefType::get({ShapedType::kDynamic}, eltType,
+                            MemRefLayoutAttrInterface{},
+                            subViewType.getMemorySpace())
+          : MemRefType::get(
+                {flattenedSize.get<Attribute>().cast<IntegerAttr>().getInt()},
+                eltType, MemRefLayoutAttrInterface{},
+                subViewType.getMemorySpace());
+  return rewriter.create<memref::ReinterpretCastOp>(
+      subViewOp.getLoc(), finalType, subViewOp.getSource(),
+      /*offset=*/rewriter.getIndexAttr(0),
+      /*sizes=*/ArrayRef<OpFoldResult>{flattenedSize}, /*strides=*/ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1)});
+}
+
+template <typename OpTy>
+LogicalResult LoadOpOfConstructStridedMetadataOpFolder<OpTy>::matchAndRewrite(
+    OpTy loadOp, PatternRewriter &rewriter) const {
+  auto subViewOp =
+      getMemRefOperand(loadOp).template getDefiningOp<memref::ConstructStridedMetadataOp>();
+
+  if (!subViewOp)
+    return failure();
+
+  SmallVector<Value> indices(loadOp.getIndices().begin(),
+                             loadOp.getIndices().end());
+  // For affine ops, we need to apply the map to get the operands to get the
+  // "actual" indices.
+  if (auto affineLoadOp = dyn_cast<AffineLoadOp>(loadOp.getOperation())) {
+    AffineMap affineMap = affineLoadOp.getAffineMap();
+    auto expandedIndices = calculateExpandedAccessIndices(
+        affineMap, indices, loadOp.getLoc(), rewriter);
+    indices.assign(expandedIndices.begin(), expandedIndices.end());
+  }
+  SmallVector<Value, 4> sourceIndices;
+  if (failed(resolveSourceIndicesConstructStridedMetadata(loadOp.getLoc(), rewriter, subViewOp,
+                                         indices, sourceIndices)))
+    return failure();
+
+  // -> base point to base pointer with a dim
+  Value source = getLoadStoreSourceFromConstructStridedMetadata(rewriter, subViewOp);
+  llvm::TypeSwitch<Operation *, void>(loadOp)
+      .Case<AffineLoadOp, memref::LoadOp>([&](auto op) {
+        rewriter.replaceOpWithNewOp<decltype(op)>(
+            loadOp, source,
+            sourceIndices);
+      })
+      // .Case([&](vector::TransferReadOp transferReadOp) {
+      //   rewriter.replaceOpWithNewOp<vector::TransferReadOp>(
+      //       transferReadOp, transferReadOp.getVectorType(),
+      //       source, sourceIndices,
+      //       getPermutationMapAttr(rewriter.getContext(), subViewOp,
+      //                             transferReadOp.getPermutationMap()),
+      //       transferReadOp.getPadding(),
+      //       /*mask=*/Value(), transferReadOp.getInBoundsAttr());
+      // })
+      .Default([](Operation *) { llvm_unreachable("unexpected operation."); });
+  return success();
+}
+template <typename OpTy>
+LogicalResult StoreOpOfConstructStridedMetadataOpFolder<OpTy>::matchAndRewrite(
+    OpTy storeOp, PatternRewriter &rewriter) const {
+  auto subViewOp =
+      getMemRefOperand(storeOp).template getDefiningOp<memref::ConstructStridedMetadataOp>();
+
+  if (!subViewOp)
+    return failure();
+
+  SmallVector<Value> indices(storeOp.getIndices().begin(),
+                             storeOp.getIndices().end());
+  // For affine ops, we need to apply the map to get the operands to get the
+  // "actual" indices.
+  if (auto affineStoreOp = dyn_cast<AffineStoreOp>(storeOp.getOperation())) {
+    AffineMap affineMap = affineStoreOp.getAffineMap();
+    auto expandedIndices = calculateExpandedAccessIndices(
+        affineMap, indices, storeOp.getLoc(), rewriter);
+    indices.assign(expandedIndices.begin(), expandedIndices.end());
+  }
+  SmallVector<Value, 4> sourceIndices;
+  if (failed(resolveSourceIndicesConstructStridedMetadata(
+          storeOp.getLoc(), rewriter, subViewOp, indices, sourceIndices)))
+    return failure();
+
+  Value source =
+      getLoadStoreSourceFromConstructStridedMetadata(rewriter, subViewOp);
+
+  llvm::TypeSwitch<Operation *, void>(storeOp)
+      .Case<AffineStoreOp, memref::StoreOp>([&](auto op) {
+        rewriter.replaceOpWithNewOp<decltype(op)>(
+            storeOp, storeOp.getValue(), source, sourceIndices);
+      })
+      // .Case([&](vector::TransferWriteOp op) {
+      //   rewriter.replaceOpWithNewOp<vector::TransferWriteOp>(
+      //       op, op.getValue(), source, sourceIndices,
+      //       getPermutationMapAttr(rewriter.getContext(), subViewOp,
+      //                             op.getPermutationMap()),
+      //       op.getInBoundsAttr());
+      // })
+      .Default([](Operation *) { llvm_unreachable("unexpected operation."); });
+  return success();
+}
+
 template <typename OpTy>
 LogicalResult StoreOpOfSubViewOpFolder<OpTy>::matchAndRewrite(
     OpTy storeOp, PatternRewriter &rewriter) const {
@@ -523,9 +719,15 @@ void memref::populateFoldMemRefAliasOpPatterns(RewritePatternSet &patterns) {
   patterns.add<LoadOpOfSubViewOpFolder<AffineLoadOp>,
                LoadOpOfSubViewOpFolder<memref::LoadOp>,
                LoadOpOfSubViewOpFolder<vector::TransferReadOp>,
+               LoadOpOfConstructStridedMetadataOpFolder<AffineLoadOp>,
+               LoadOpOfConstructStridedMetadataOpFolder<memref::LoadOp>,
+//               LoadOpOfConstructStridedMetadataOpFolder<vector::TransferReadOp>,
                StoreOpOfSubViewOpFolder<AffineStoreOp>,
                StoreOpOfSubViewOpFolder<memref::StoreOp>,
                StoreOpOfSubViewOpFolder<vector::TransferWriteOp>,
+               StoreOpOfConstructStridedMetadataOpFolder<AffineStoreOp>,
+               StoreOpOfConstructStridedMetadataOpFolder<memref::StoreOp>,
+//               StoreOpOfConstructStridedMetadataOpFolder<vector::TransferWriteOp>,
                LoadOpOfExpandShapeOpFolder<AffineLoadOp>,
                LoadOpOfExpandShapeOpFolder<memref::LoadOp>,
                StoreOpOfExpandShapeOpFolder<AffineStoreOp>,

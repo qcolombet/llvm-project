@@ -136,7 +136,7 @@ public:
     assert(finalSizes.size() == subRank &&
            "Should have populated all the values at this point");
 
-    auto memrefDesc = rewriter.create<memref::ReinterpretCastOp>(
+    auto memrefDesc = rewriter.create<memref::ConstructStridedMetadataOp>(
         origLoc, subType, newExtractStridedMetadata.getBaseBuffer(),
         finalOffset,
         /*sizes=*/finalSizes,
@@ -502,7 +502,7 @@ public:
     // Get the special case of 0-D out of the way.
     if (sourceRank == 0) {
       SmallVector<OpFoldResult> ones(reshapeRank, rewriter.getIndexAttr(1));
-      auto memrefDesc = rewriter.create<memref::ReinterpretCastOp>(
+      auto memrefDesc = rewriter.create<memref::ConstructStridedMetadataOp>(
           origLoc, reshapeType, newExtractStridedMetadata.getBaseBuffer(),
           offsetOfr, /*sizes=*/ones, /*strides=*/ones);
       rewriter.replaceOp(reshape, memrefDesc.getResult());
@@ -537,7 +537,7 @@ public:
            "We should have visited all the input dimensions");
     assert(finalSizes.size() == reshapeRank &&
            "We should have populated all the values");
-    auto memrefDesc = rewriter.create<memref::ReinterpretCastOp>(
+    auto memrefDesc = rewriter.create<memref::ConstructStridedMetadataOp>(
         origLoc, reshapeType, newExtractStridedMetadata.getBaseBuffer(),
         offsetOfr, finalSizes, finalStrides);
     rewriter.replaceOp(reshape, memrefDesc.getResult());

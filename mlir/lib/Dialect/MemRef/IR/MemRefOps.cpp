@@ -1921,6 +1921,135 @@ OpFoldResult ReinterpretCastOp::getConstifiedMixedOffset() {
   return values[0];
 }
 
+SmallVector<OpFoldResult> ConstructStridedMetadataOp::getConstifiedMixedSizes() {
+  SmallVector<OpFoldResult> values = getMixedSizes();
+  constifyIndexValues(values, getType(), getContext(), getConstantSizes,
+                      ShapedType::isDynamic);
+  return values;
+}
+
+SmallVector<OpFoldResult> ConstructStridedMetadataOp::getConstifiedMixedStrides() {
+  SmallVector<OpFoldResult> values = getMixedStrides();
+  constifyIndexValues(values, getType(), getContext(), getConstantStrides,
+                      ShapedType::isDynamic);
+  return values;
+}
+
+OpFoldResult ConstructStridedMetadataOp::getConstifiedMixedOffset() {
+  SmallVector<OpFoldResult> values = getMixedOffsets();
+  assert(values.size() == 1 &&
+         "reinterpret_cast must have one and only one offset");
+  constifyIndexValues(values, getType(), getContext(), getConstantOffset,
+                      ShapedType::isDynamic);
+  return values[0];
+}
+
+void ConstructStridedMetadataOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  setNameFn(getResult(), "construct_strided_metadata");
+}
+LogicalResult ConstructStridedMetadataOp::verify() {
+  // The source and result memrefs should be in the same memory space.
+  auto srcType = getSource().getType().cast<BaseMemRefType>();
+  auto resultType = getType().cast<MemRefType>();
+  if (srcType.getMemorySpace() != resultType.getMemorySpace())
+    return emitError("different memory spaces specified for source type ")
+           << srcType << " and result memref type " << resultType;
+  if (srcType.getElementType() != resultType.getElementType())
+    return emitError("different element types specified for source type ")
+           << srcType << " and result memref type " << resultType;
+
+  // Match sizes in result memref type and in static_sizes attribute.
+  for (auto &en :
+       llvm::enumerate(llvm::zip(resultType.getShape(), getStaticSizes()))) {
+    int64_t resultSize = std::get<0>(en.value());
+    int64_t expectedSize = std::get<1>(en.value());
+    if (!ShapedType::isDynamic(resultSize) &&
+        !ShapedType::isDynamic(expectedSize) && resultSize != expectedSize)
+      return emitError("expected result type with size = ")
+             << expectedSize << " instead of " << resultSize
+             << " in dim = " << en.index();
+  }
+
+  // Match offset and strides in static_offset and static_strides attributes. If
+  // result memref type has no affine map specified, this will assume an
+  // identity layout.
+  int64_t resultOffset;
+  SmallVector<int64_t, 4> resultStrides;
+  if (failed(getStridesAndOffset(resultType, resultStrides, resultOffset)))
+    return emitError("expected result type to have strided layout but found ")
+           << resultType;
+
+  // Match offset in result memref type and in static_offsets attribute.
+  int64_t expectedOffset = getStaticOffsets().front();
+  if (!ShapedType::isDynamic(resultOffset) &&
+      !ShapedType::isDynamic(expectedOffset) &&
+      resultOffset != expectedOffset)
+    return emitError("expected result type with offset = ")
+           << resultOffset << " instead of " << expectedOffset;
+
+  // Match strides in result memref type and in static_strides attribute.
+  for (auto &en :
+       llvm::enumerate(llvm::zip(resultStrides, getStaticStrides()))) {
+    int64_t resultStride = std::get<0>(en.value());
+    int64_t expectedStride = std::get<1>(en.value());
+    if (!ShapedType::isDynamic(resultStride) &&
+        !ShapedType::isDynamic(expectedStride) &&
+        resultStride != expectedStride)
+      return emitError("expected result type with stride = ")
+             << expectedStride << " instead of " << resultStride
+             << " in dim = " << en.index();
+  }
+
+  return success();
+}
+void ConstructStridedMetadataOp::build(OpBuilder &b, OperationState &result,
+                              MemRefType resultType, Value source,
+                              OpFoldResult offset, ArrayRef<OpFoldResult> sizes,
+                              ArrayRef<OpFoldResult> strides,
+                              ArrayRef<NamedAttribute> attrs) {
+  SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
+  SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
+  dispatchIndexOpFoldResults(offset, dynamicOffsets, staticOffsets,
+                             ShapedType::kDynamic);
+  dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes,
+                             ShapedType::kDynamic);
+  dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides,
+                             ShapedType::kDynamic);
+  build(b, result, resultType, source, dynamicOffsets, dynamicSizes,
+        dynamicStrides, b.getDenseI64ArrayAttr(staticOffsets),
+        b.getDenseI64ArrayAttr(staticSizes),
+        b.getDenseI64ArrayAttr(staticStrides));
+  result.addAttributes(attrs);
+}
+
+void ConstructStridedMetadataOp::build(OpBuilder &b, OperationState &result,
+                              MemRefType resultType, Value source,
+                              int64_t offset, ArrayRef<int64_t> sizes,
+                              ArrayRef<int64_t> strides,
+                              ArrayRef<NamedAttribute> attrs) {
+  SmallVector<OpFoldResult> sizeValues =
+      llvm::to_vector<4>(llvm::map_range(sizes, [&](int64_t v) -> OpFoldResult {
+        return b.getI64IntegerAttr(v);
+      }));
+  SmallVector<OpFoldResult> strideValues = llvm::to_vector<4>(
+      llvm::map_range(strides, [&](int64_t v) -> OpFoldResult {
+        return b.getI64IntegerAttr(v);
+      }));
+  build(b, result, resultType, source, b.getI64IntegerAttr(offset), sizeValues,
+        strideValues, attrs);
+}
+
+void ConstructStridedMetadataOp::build(OpBuilder &b, OperationState &result,
+                              MemRefType resultType, Value source, Value offset,
+                              ValueRange sizes, ValueRange strides,
+                              ArrayRef<NamedAttribute> attrs) {
+  SmallVector<OpFoldResult> sizeValues = llvm::to_vector<4>(
+      llvm::map_range(sizes, [](Value v) -> OpFoldResult { return v; }));
+  SmallVector<OpFoldResult> strideValues = llvm::to_vector<4>(
+      llvm::map_range(strides, [](Value v) -> OpFoldResult { return v; }));
+  build(b, result, resultType, source, offset, sizeValues, strideValues, attrs);
+}
 namespace {
 /// Replace the sequence:
 /// ```

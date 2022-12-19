@@ -933,6 +933,113 @@ def MemRef_ExtractStridedMetadataOp : MemRef_Op<"extract_strided_metadata", [
   let hasFolder = 1;
 }
 
+def MemRef_ConstructStridedMetadataOp
+  : MemRef_OpWithOffsetSizesAndStrides<"construct_strided_metadata", [
+      DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
+      AttrSizedOperandSegments,
+      MemRefsNormalizable,
+      Pure,
+      OffsetSizeAndStrideOpInterface,
+      ViewLikeOpInterface
+    ]> {
+  let summary = "memref reinterpret cast operation";
+  let description = [{
+    Modify offset, sizes and strides of an unranked/ranked memref.
+
+    Example:
+    ```mlir
+    memref.reinterpret_cast %ranked to
+      offset: [0],
+      sizes: [%size0, 10],
+      strides: [1, %stride1]
+    : memref<?x?xf32> to memref<?x10xf32, strided<[1, ?], offset: 0>>
+
+    memref.reinterpret_cast %unranked to
+      offset: [%offset],
+      sizes: [%size0, %size1],
+      strides: [%stride0, %stride1]
+    : memref<*xf32> to memref<?x?xf32, strided<[?, ?], offset: ?>>
+    ```
+  }];
+
+  let arguments = (ins Arg<AnyStridedMemRefOfRank<0>, "", []>:$source,
+                       Variadic<Index>:$offsets,
+                       Variadic<Index>:$sizes,
+                       Variadic<Index>:$strides,
+                       DenseI64ArrayAttr:$static_offsets,
+                       DenseI64ArrayAttr:$static_sizes,
+                       DenseI64ArrayAttr:$static_strides);
+  let results = (outs AnyStridedMemRef:$result);
+
+  let assemblyFormat = [{
+    $source `to` `offset` `` `:`
+    custom<DynamicIndexList>($offsets, $static_offsets)
+    `` `,` `sizes` `` `:`
+    custom<DynamicIndexList>($sizes, $static_sizes)
+    `` `,` `strides` `` `:`
+    custom<DynamicIndexList>($strides, $static_strides)
+    attr-dict `:` type($source) `to` type($result)
+  }];
+
+  let hasVerifier = 1;
+
+  let builders = [
+    // Build a ReinterpretCastOp with mixed static and dynamic entries.
+    OpBuilder<(ins "MemRefType":$resultType, "Value":$source,
+      "OpFoldResult":$offset, "ArrayRef<OpFoldResult>":$sizes,
+      "ArrayRef<OpFoldResult>":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+    // Build a ReinterpretCastOp with static entries.
+    OpBuilder<(ins "MemRefType":$resultType, "Value":$source,
+      "int64_t":$offset, "ArrayRef<int64_t>":$sizes,
+      "ArrayRef<int64_t>":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+    // Build a ReinterpretCastOp with dynamic entries.
+    OpBuilder<(ins "MemRefType":$resultType, "Value":$source,
+      "Value":$offset, "ValueRange":$sizes,
+      "ValueRange":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>
+  ];
+
+  let extraClassDeclaration = extraBaseClassDeclaration # [{
+    // The result of the op is always a ranked memref.
+    MemRefType getType() { return getResult().getType().cast<MemRefType>(); }
+    Value getViewSource() { return getSource(); }
+
+    /// Return the rank of the source ShapedType.
+    unsigned getResultRank() {
+      return getResult().getType().cast<ShapedType>().getRank();
+    }
+
+    /// Return the expected rank of each of the`static_offsets`, `static_sizes`
+    /// and `static_strides` attributes.
+    std::array<unsigned, 3> getArrayAttrMaxRanks() {
+      unsigned resultRank = getResult().getType().cast<ShapedType>().getRank();
+      return {1, resultRank, resultRank};
+    }
+
+    /// Return the number of leading operands before the `offsets`, `sizes` and
+    /// and `strides` operands.
+    static unsigned getOffsetSizeAndStrideStartOperandIndex() { return 1; }
+
+    /// Return a vector of all the static or dynamic sizes of the op, while
+    /// statically inferring the sizes of the dynamic sizes, when possible.
+    /// This is best effort.
+    /// E.g., if `getMixedSizes` returns `[2, %dyn_size]`, but the resulting
+    /// memref type is `memref<2x8xi16>`, this method will return `[2, 8]`.
+    /// Similarly if the resulting memref type is `memref<2x?xi16>`, but
+    /// `%dyn_size` can statically be pinned to a constant value, this
+    /// constant value is returned instead of `%dyn_size`.
+    SmallVector<OpFoldResult> getConstifiedMixedSizes();
+    /// Similar to `getConstifiedMixedSizes` but for strides.
+    SmallVector<OpFoldResult> getConstifiedMixedStrides();
+    /// Similar to `getConstifiedMixedSizes` but for the offset.
+    OpFoldResult getConstifiedMixedOffset();
+  }];
+
+  // let hasFolder = 1;
+  // let hasCanonicalizer = 1;
+}
 //===----------------------------------------------------------------------===//
 // GenericAtomicRMWOp
 //===----------------------------------------------------------------------===//
