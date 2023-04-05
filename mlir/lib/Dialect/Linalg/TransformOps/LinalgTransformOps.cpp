@@ -823,6 +823,92 @@ struct LowerPackResult {
   linalg::TransposeOp transposeOp;
 };
 
+static FailureOr<tensor::PadOp> tryLowerAsPad(RewriterBase &rewriter,
+                                              tensor::PackOp packOp) {
+  // This is a pad if packing only adds ones and we don't transpose dimensions.
+
+  // Check that we are not transposing any dimensions.
+  int64_t expectedDimIdx = 0;
+  for (int64_t dimIdx : packOp.getInnerDimsPos()) {
+    if (dimIdx != expectedDimIdx++) {
+      // This dimension doesn't happen in order, but we don't care if its size
+      // is 1.
+      return rewriter.notifyMatchFailure(packOp, "transpose is required");
+    }
+  }
+
+  auto packedTensorType =
+      packOp->getResultTypes().front().cast<RankedTensorType>();
+  int64_t numPackedDims = packOp.getInnerDimsPos().size();
+  int64_t packedRank = packedTensorType.getRank();
+  auto lastDims = llvm::to_vector(
+      llvm::seq<int64_t>(packedRank - numPackedDims, packedRank));
+  PackingMetadata packingMetadata = computePackingMetadata(
+      packedTensorType.getRank(), packOp.getInnerDimsPos());
+
+  SmallVector<int64_t> lastDimsToInsertPositionsPerm = computePermutationVector(
+      packedRank, lastDims, packingMetadata.insertPositions);
+
+  // 3. Compute the stripMinedShape: this is the packed shape before any outer
+  // or inner permutations have been applied.
+  SmallVector<int64_t> stripMinedShape(packedTensorType.getShape());
+  applyPermutationToVector(stripMinedShape, lastDimsToInsertPositionsPerm);
+
+  RankedTensorType collapsed = tensor::CollapseShapeOp::inferCollapsedType(
+      RankedTensorType::Builder(packedTensorType).setShape(stripMinedShape),
+      packingMetadata.reassociations);
+
+  ArrayRef<int64_t> origShape = collapsed.getShape();
+  for (int64_t grpIdx = 0, endGrpIdx = packingMetadata.reassociations.size();
+       grpIdx != endGrpIdx; ++grpIdx) {
+    const ReassociationIndices &reassocGrp =
+        packingMetadata.reassociations[grpIdx];
+    if (reassocGrp.size() == 1)
+      continue;
+    // Check if expand group is origDimSize x 1.
+    assert(reassocGrp.size() == 2 && "Should only add one dim per packed dim");
+    int64_t dimGrpA = stripMinedShape[reassocGrp[0]];
+    int64_t dimGrpB = stripMinedShape[reassocGrp[1]];
+    if (dimGrpB == 1)
+      std::swap(dimGrpA, dimGrpB);
+    if (dimGrpA != 1 || dimGrpB != origShape[grpIdx])
+      return rewriter.notifyMatchFailure(
+          packOp, "expanded dimension is not '1 x origDim'");
+  }
+
+  // At this point we know that we only expand the dimensions with 1x.
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(packOp);
+  Location loc = packOp->getLoc();
+  Value paddingValue = packOp.getPaddingValue();
+  if (!paddingValue) {
+    rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getZeroAttr(getElementTypeOrSelf(collapsed)));
+  }
+  auto padOp =
+      tensor::createPadHighOp(collapsed, packOp.getSource(), paddingValue,
+                              /*nofold=*/false, loc, rewriter);
+  // Now insert this slice in the higher ranked tensor.
+  auto emptyOp =
+      rewriter.create<tensor::EmptyOp>(loc, packedTensorType, ValueRange{});
+  // offsets.
+  SmallVector<OpFoldResult> zeros(packedRank, rewriter.getIndexAttr(0));
+  // Strides.
+  SmallVector<OpFoldResult> ones(packedRank, rewriter.getIndexAttr(1));
+  SmallVector<OpFoldResult> sizes;
+  for (int64_t dstSize : stripMinedShape) {
+    sizes.push_back(rewriter.getIndexAttr(dstSize));
+  }
+  auto insertOp = rewriter.create<tensor::InsertSliceOp>(
+      loc, /*source=*/padOp, /*dest=*/emptyOp,
+      /*offsets=*/zeros, sizes,
+      /*strides=*/ones);
+  rewriter.replaceOp(packOp, insertOp.getResult());
+
+  llvm::dbgs() << "Found a pad\n";
+  return padOp;
+}
+
 /// Rewrite pack as pad + reshape + transpose.
 static FailureOr<LowerPackResult> lowerPack(RewriterBase &rewriter,
                                             tensor::PackOp packOp) {
@@ -836,6 +922,12 @@ static FailureOr<LowerPackResult> lowerPack(RewriterBase &rewriter,
     return rewriter.notifyMatchFailure(
         packOp,
         "non-static shape NYI, needs a more powerful tensor.expand_shape op");
+  }
+
+  // Check if this is a plain pad op with more dimension and just lower to that.
+  FailureOr<tensor::PadOp> maybePadOp = tryLowerAsPad(rewriter, packOp);
+  if (succeeded(maybePadOp)) {
+    return LowerPackResult{*maybePadOp, nullptr, nullptr};
   }
 
   Location loc = packOp->getLoc();
