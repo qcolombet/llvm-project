@@ -1032,6 +1032,79 @@ struct LowerUnPackOpResult {
   tensor::ExtractSliceOp extractSliceOp;
 };
 
+FailureOr<tensor::ExtractSliceOp> tryLowerAsUnpad(RewriterBase &rewriter,
+                                                  tensor::UnPackOp unPackOp) {
+  int64_t expectedDimIdx = 0;
+  for (int64_t dimIdx : unPackOp.getInnerDimsPos()) {
+    if (dimIdx != expectedDimIdx++) {
+      // This dimension doesn't happen in order, but we don't care if its size
+      // is 1.
+      return rewriter.notifyMatchFailure(unPackOp, "transpose is required");
+    }
+  }
+
+  Location loc = unPackOp->getLoc();
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(unPackOp);
+
+  RankedTensorType packedTensorType = unPackOp.getSourceType();
+  // 2. Compute the permutation vector to move the last `numPackedDims` into the
+  // `innerPosDims` of a shape of rank `packedRank`.
+  int64_t numPackedDims = unPackOp.getInnerDimsPos().size();
+  int64_t packedRank = packedTensorType.getRank();
+  auto lastDims = llvm::to_vector(
+      llvm::seq<int64_t>(packedRank - numPackedDims, packedRank));
+  PackingMetadata packingMetadata =
+      computePackingMetadata(packedRank, unPackOp.getInnerDimsPos());
+  SmallVector<int64_t> lastDimsToInsertPositionsPerm = computePermutationVector(
+      packedRank, lastDims, packingMetadata.insertPositions);
+
+  // 3. Compute the stripMinedShape: this is the packed shape without outer and
+  // inner permutations.
+  SmallVector<int64_t> stripMinedShape(packedTensorType.getShape());
+  applyPermutationToVector(stripMinedShape, lastDimsToInsertPositionsPerm);
+
+  // 4. Transpose packedShape to stripMinedShape.
+  RankedTensorType stripMinedTensorType =
+      RankedTensorType::Builder(packedTensorType).setShape(stripMinedShape);
+  RankedTensorType collapsedType = tensor::CollapseShapeOp::inferCollapsedType(
+      stripMinedTensorType, packingMetadata.reassociations);
+
+  ArrayRef<int64_t> origShape = collapsedType.getShape();
+  for (int64_t grpIdx = 0, endGrpIdx = packingMetadata.reassociations.size();
+       grpIdx != endGrpIdx; ++grpIdx) {
+    const ReassociationIndices &reassocGrp =
+        packingMetadata.reassociations[grpIdx];
+    if (reassocGrp.size() == 1)
+      continue;
+    // Check if collapsed group is origDimSize x 1.
+    assert(reassocGrp.size() == 2 && "Should only add one dim per packed dim");
+    int64_t dimGrpA = stripMinedShape[reassocGrp[0]];
+    int64_t dimGrpB = stripMinedShape[reassocGrp[1]];
+    if (dimGrpB == 1)
+      std::swap(dimGrpA, dimGrpB);
+    if (dimGrpA != 1 || dimGrpB != origShape[grpIdx])
+      return rewriter.notifyMatchFailure(
+          unPackOp, "expanded dimension is not '1 x origDim'");
+  }
+
+  // 6. ExtractSlice
+  auto destTensorType = unPackOp.getDest().getType().cast<RankedTensorType>();
+  ArrayRef<int64_t> destShape = destTensorType.getShape();
+  OpFoldResult zero = rewriter.getIndexAttr(0), one = rewriter.getIndexAttr(1);
+  SmallVector<OpFoldResult> sizes(packedRank - destShape.size(), one);
+  for (int64_t dstSize : destShape) {
+    sizes.push_back(rewriter.getIndexAttr(dstSize));
+  }
+  auto extractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
+      loc, destTensorType, unPackOp.getSource(),
+      SmallVector<OpFoldResult>(packedRank, zero), sizes,
+      SmallVector<OpFoldResult>(packedRank, one));
+
+  rewriter.replaceOp(unPackOp, extractSliceOp->getResults());
+  return extractSliceOp;
+}
+
 /// Rewrite pack as empty + transpose + reshape + extract_slice.
 static FailureOr<LowerUnPackOpResult> lowerUnPack(RewriterBase &rewriter,
                                                   tensor::UnPackOp unPackOp) {
@@ -1046,6 +1119,11 @@ static FailureOr<LowerUnPackOpResult> lowerUnPack(RewriterBase &rewriter,
         "non-static shape NYI, needs a more powerful tensor.expand_shape op");
   }
 
+  FailureOr<tensor::ExtractSliceOp> maybeExtractSlice =
+      tryLowerAsUnpad(rewriter, unPackOp);
+  if (succeeded(maybeExtractSlice)) {
+    return LowerUnPackOpResult{nullptr, nullptr, nullptr, *maybeExtractSlice};
+  }
   Location loc = unPackOp->getLoc();
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(unPackOp);
