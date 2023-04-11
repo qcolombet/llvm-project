@@ -894,11 +894,13 @@ static FailureOr<tensor::PadOp> tryLowerAsPad(RewriterBase &rewriter,
   // offsets.
   SmallVector<OpFoldResult> zeros(packedRank, rewriter.getIndexAttr(0));
   // Strides.
-  SmallVector<OpFoldResult> ones(packedRank, rewriter.getIndexAttr(1));
-  SmallVector<OpFoldResult> sizes;
-  for (int64_t dstSize : stripMinedShape) {
+  OpFoldResult one = rewriter.getIndexAttr(1);
+  SmallVector<OpFoldResult> ones(packedRank, one);
+  SmallVector<OpFoldResult> sizes(packedRank - origShape.size(), one);
+  for (int64_t dstSize : origShape) {
     sizes.push_back(rewriter.getIndexAttr(dstSize));
   }
+
   auto insertOp = rewriter.create<tensor::InsertSliceOp>(
       loc, /*source=*/padOp, /*dest=*/emptyOp,
       /*offsets=*/zeros, sizes,
