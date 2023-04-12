@@ -3709,6 +3709,48 @@ LogicalResult PackOp::canonicalize(PackOp packOp, PatternRewriter &rewriter) {
   return success();
 }
 
+template <typename PackOrUnpackOp>
+static bool isLikePadUnPad(PackOrUnpackOp packOp,
+                           RankedTensorType packedTensorType) {
+  static_assert(std::is_same<PackOrUnpackOp, tensor::PackOp>::value ||
+                    std::is_same<PackOrUnpackOp, tensor::UnPackOp>::value,
+                "Function meant for pack/unpack");
+  // This is a pad if packing only adds ones and we don't transpose dimensions.
+
+  // Check that we are not transposing any dimensions.
+  int64_t expectedDimIdx = 0;
+  ArrayRef<int64_t> innerDimsPos = packOp.getInnerDimsPos();
+  for (int64_t dimIdx : innerDimsPos) {
+    if (dimIdx != expectedDimIdx++) {
+      // This dimension doesn't happen in order.
+      return false;
+    }
+  }
+  int64_t numPackedDims = innerDimsPos.size();
+  ArrayRef<int64_t> packedShape = packedTensorType.getShape();
+  int64_t packedRank = packedTensorType.getRank();
+  // At this point we know that we are taking numPackedDims outer
+  // dimensions and pushing them all the way as the inner most dimensions.
+  // What's left on the outer most dimensions is in this order:
+  // - the factor of the packed dimensions, then
+  // - the untouched dimensions
+  // This shifting inward of dimensions is a no-op (as opposed to a transpose)
+  // if all the dimensions that bubble outerward are ones.
+  // Therefore check that all the dimensions but the numPackedDims inner most
+  // ones are ones.
+  for (int i = 0; i != packedRank - numPackedDims; ++i) {
+    if (packedShape[i] != 1)
+      return false;
+  }
+  return true;
+}
+
+bool PackOp::isLikePad() {
+  auto packedTensorType =
+      (*this)->getResultTypes().front().cast<RankedTensorType>();
+  return isLikePadUnPad(*this, packedTensorType);
+}
+
 //===----------------------------------------------------------------------===//
 // UnPackOp
 //===----------------------------------------------------------------------===//
@@ -3822,6 +3864,10 @@ LogicalResult UnPackOp::canonicalize(UnPackOp unPackOp,
   return success();
 }
 
+bool UnPackOp::isLikeUnPad() {
+  RankedTensorType packedTensorType = getSourceType();
+  return isLikePadUnPad(*this, packedTensorType);
+}
 //===----------------------------------------------------------------------===//
 // Common Canonicalizers and Folders.
 //===----------------------------------------------------------------------===//
