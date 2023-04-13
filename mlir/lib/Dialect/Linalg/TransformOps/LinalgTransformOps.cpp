@@ -813,9 +813,6 @@ static FailureOr<LowerPackResult> lowerPack(RewriterBase &rewriter,
       llvm::interleaveComma(stripMinedShape, DBGS() << "stripMinedShape: ");
       DBGSNL(); DBGS() << "collapsed type: " << collapsed; DBGSNL(););
 
-  Operation *replacementOp = nullptr;
-  tensor::ExpandShapeOp reshapeOp = nullptr;
-  linalg::TransposeOp transposeOp = nullptr;
   if (packOp.isLikePad()) {
     // This pack is just a plain pad.
     // Just insert the pad in the higher ranked tensor.
@@ -832,40 +829,38 @@ static FailureOr<LowerPackResult> lowerPack(RewriterBase &rewriter,
     for (int64_t dstSize : origShape)
       sizes.push_back(rewriter.getIndexAttr(dstSize));
 
-    replacementOp = rewriter.create<tensor::InsertSliceOp>(
+    auto insertSliceOp = rewriter.create<tensor::InsertSliceOp>(
         loc, /*source=*/padOp, /*dest=*/emptyOp,
         /*offsets=*/zeros, sizes,
         /*strides=*/ones);
-    LLVM_DEBUG(DBGSNL(); DBGSNL(); DBGSNL();
-               DBGS() << "insert_slice op: " << replacementOp; DBGSNL(););
-  } else {
-    // 5. Expand from the padded result to the stripMinedShape.
-    reshapeOp = rewriter.create<tensor::ExpandShapeOp>(
-        loc,
-        RankedTensorType::Builder(packedTensorType).setShape(stripMinedShape),
-        padOp.getResult(), packingMetadata.reassociations);
 
-    // 6. Transpose stripMinedShape to packedShape.
-    SmallVector<int64_t> insertPositionsToLastDimsPerm =
-        computePermutationVector(packedRank, packingMetadata.insertPositions,
-                                 lastDims);
-    transposeOp = rewriter.create<linalg::TransposeOp>(
-        loc, reshapeOp.getResult(), packOp.getDest(),
-        insertPositionsToLastDimsPerm);
+    LLVM_DEBUG(DBGS() << "insert_slice op: " << insertSliceOp; DBGSNL(););
 
-    LLVM_DEBUG(
-        DBGSNL(); DBGSNL(); DBGSNL(); DBGS() << "reshape op: " << reshapeOp;
-        DBGSNL();
-        llvm::interleaveComma(insertPositionsToLastDimsPerm,
-                              DBGS() << "insertPositionsToLastDimsPerm: ");
-        DBGSNL(); DBGS() << "transpose op: " << transposeOp; DBGSNL(););
-    replacementOp = transposeOp;
+    rewriter.replaceOp(packOp, insertSliceOp->getResults());
+
+    return LowerPackResult{padOp, /*reshapeOp=*/nullptr,
+                           /*transposeOp=*/nullptr};
   }
-  assert(padOp && replacementOp &&
-         (packOp.isLikePad() || (reshapeOp && transposeOp)) &&
-         "If pack is not a pad, all intermediates steps should happen");
-  // Replace packOp by the final replacement op.
-  rewriter.replaceOp(packOp, replacementOp->getResults());
+  // 5. Expand from the padded result to the stripMinedShape.
+  auto reshapeOp = rewriter.create<tensor::ExpandShapeOp>(
+      loc,
+      RankedTensorType::Builder(packedTensorType).setShape(stripMinedShape),
+      padOp.getResult(), packingMetadata.reassociations);
+
+  // 6. Transpose stripMinedShape to packedShape.
+  SmallVector<int64_t> insertPositionsToLastDimsPerm = computePermutationVector(
+      packedRank, packingMetadata.insertPositions, lastDims);
+  auto transposeOp = rewriter.create<linalg::TransposeOp>(
+      loc, reshapeOp.getResult(), packOp.getDest(),
+      insertPositionsToLastDimsPerm);
+
+  LLVM_DEBUG(DBGSNL(); DBGSNL(); DBGSNL();
+             DBGS() << "reshape op: " << reshapeOp; DBGSNL();
+             llvm::interleaveComma(insertPositionsToLastDimsPerm,
+                                   DBGS() << "insertPositionsToLastDimsPerm: ");
+             DBGSNL(); DBGS() << "transpose op: " << transposeOp; DBGSNL(););
+  // 7. Replace packOp by transposeOp.
+  rewriter.replaceOp(packOp, transposeOp->getResults());
 
   return LowerPackResult{padOp, reshapeOp, transposeOp};
 }
@@ -917,11 +912,6 @@ static FailureOr<LowerUnPackOpResult> lowerUnPack(RewriterBase &rewriter,
 
   int64_t packedRank = packedTensorType.getRank();
 
-  tensor::EmptyOp emptyOp = nullptr;
-  linalg::TransposeOp transposeOp = nullptr;
-  tensor::CollapseShapeOp reshapeOp = nullptr;
-  tensor::ExtractSliceOp extractSliceOp = nullptr;
-
   OpFoldResult zero = rewriter.getIndexAttr(0), one = rewriter.getIndexAttr(1);
   auto destTensorType = unPackOp.getDest().getType().cast<RankedTensorType>();
   if (unPackOp.isLikeUnPad()) {
@@ -932,73 +922,71 @@ static FailureOr<LowerUnPackOpResult> lowerUnPack(RewriterBase &rewriter,
     for (int64_t dstSize : destShape) {
       sizes.push_back(rewriter.getIndexAttr(dstSize));
     }
-    extractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
+    auto extractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
         loc, destTensorType, unPackOp.getSource(),
         SmallVector<OpFoldResult>(packedRank, zero), sizes,
         SmallVector<OpFoldResult>(packedRank, one));
-  } else {
-    // 2. Compute the permutation vector to move the last `numPackedDims` into
-    // the `innerPosDims` of a shape of rank `packedRank`.
-    int64_t numPackedDims = unPackOp.getInnerDimsPos().size();
-    auto lastDims = llvm::to_vector(
-        llvm::seq<int64_t>(packedRank - numPackedDims, packedRank));
-    PackingMetadata packingMetadata =
-        computePackingMetadata(packedRank, unPackOp.getInnerDimsPos());
-    SmallVector<int64_t> lastDimsToInsertPositionsPerm =
-        computePermutationVector(packedRank, lastDims,
-                                 packingMetadata.insertPositions);
+    rewriter.replaceOp(unPackOp, extractSliceOp->getResults());
 
-    // 3. Compute the stripMinedShape: this is the packed shape without outer
-    // and inner permutations.
-    SmallVector<int64_t> stripMinedShape(packedTensorType.getShape());
-    applyPermutationToVector(stripMinedShape, lastDimsToInsertPositionsPerm);
-
-    // 4. Transpose packedShape to stripMinedShape.
-    RankedTensorType stripMinedTensorType =
-        RankedTensorType::Builder(packedTensorType).setShape(stripMinedShape);
-    RankedTensorType collapsedType =
-        tensor::CollapseShapeOp::inferCollapsedType(
-            stripMinedTensorType, packingMetadata.reassociations);
-    emptyOp = rewriter.create<tensor::EmptyOp>(loc, stripMinedTensorType,
-                                               ValueRange{});
-    transposeOp = rewriter.create<linalg::TransposeOp>(
-        loc, unPackOp.getSource(), emptyOp, lastDimsToInsertPositionsPerm);
-
-    LLVM_DEBUG(
-        DBGSNL(); DBGSNL(); llvm::interleaveComma(
-            packingMetadata.insertPositions, DBGS() << "insertPositions: ");
-        DBGSNL(); llvm::interleaveComma(packedTensorType.getShape(),
-                                        DBGS() << "packedShape: ");
-        DBGSNL();
-        llvm::interleaveComma(lastDimsToInsertPositionsPerm,
-                              DBGS() << "lastDimsToInsertPositionsPerm: ");
-        DBGSNL(); llvm::interleaveComma(
-            packingMetadata.reassociations, DBGS() << "reassociations: ",
-            [&](ReassociationIndices ri) {
-              llvm::interleaveComma(ri, llvm::dbgs() << "|");
-            });
-        DBGSNL();
-        llvm::interleaveComma(stripMinedShape, DBGS() << "stripMinedShape: ");
-        DBGSNL(); DBGS() << "collapsed type: " << collapsedType; DBGSNL(););
-
-    // 5. Collapse from the stripMinedShape to the padded result.
-    reshapeOp = rewriter.create<tensor::CollapseShapeOp>(
-        loc, collapsedType, transposeOp->getResult(0),
-        packingMetadata.reassociations);
-
-    // 6. ExtractSlice
-    int64_t destRank = destTensorType.getRank();
-    extractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
-        loc, destTensorType, reshapeOp->getResult(0),
-        SmallVector<OpFoldResult>(destRank, zero),
-        tensor::getMixedSizes(rewriter, loc, unPackOp->getResult(0)),
-        SmallVector<OpFoldResult>(destRank, one));
+    return LowerUnPackOpResult{/*emptyOp=*/nullptr, /*transposeOp=*/nullptr,
+                               /*reshapeOp=*/nullptr, extractSliceOp};
   }
+  // 2. Compute the permutation vector to move the last `numPackedDims` into
+  // the `innerPosDims` of a shape of rank `packedRank`.
+  int64_t numPackedDims = unPackOp.getInnerDimsPos().size();
+  auto lastDims = llvm::to_vector(
+      llvm::seq<int64_t>(packedRank - numPackedDims, packedRank));
+  PackingMetadata packingMetadata =
+      computePackingMetadata(packedRank, unPackOp.getInnerDimsPos());
+  SmallVector<int64_t> lastDimsToInsertPositionsPerm = computePermutationVector(
+      packedRank, lastDims, packingMetadata.insertPositions);
 
-  assert(extractSliceOp &&
-         (unPackOp.isLikeUnPad() || (emptyOp && transposeOp && reshapeOp)) &&
-         "If unPackOp is not a pad, all intermediate steps should happen");
-  // Replace unPackOp by extractSliceOp.
+  // 3. Compute the stripMinedShape: this is the packed shape without outer and
+  // inner permutations.
+  SmallVector<int64_t> stripMinedShape(packedTensorType.getShape());
+  applyPermutationToVector(stripMinedShape, lastDimsToInsertPositionsPerm);
+
+  // 4. Transpose packedShape to stripMinedShape.
+  RankedTensorType stripMinedTensorType =
+      RankedTensorType::Builder(packedTensorType).setShape(stripMinedShape);
+  RankedTensorType collapsedType = tensor::CollapseShapeOp::inferCollapsedType(
+      stripMinedTensorType, packingMetadata.reassociations);
+  auto emptyOp =
+      rewriter.create<tensor::EmptyOp>(loc, stripMinedTensorType, ValueRange{});
+  auto transposeOp = rewriter.create<linalg::TransposeOp>(
+      loc, unPackOp.getSource(), emptyOp, lastDimsToInsertPositionsPerm);
+
+  LLVM_DEBUG(
+      DBGSNL(); DBGSNL(); llvm::interleaveComma(packingMetadata.insertPositions,
+                                                DBGS() << "insertPositions: ");
+      DBGSNL(); llvm::interleaveComma(packedTensorType.getShape(),
+                                      DBGS() << "packedShape: ");
+      DBGSNL();
+      llvm::interleaveComma(lastDimsToInsertPositionsPerm,
+                            DBGS() << "lastDimsToInsertPositionsPerm: ");
+      DBGSNL(); llvm::interleaveComma(
+          packingMetadata.reassociations, DBGS() << "reassociations: ",
+          [&](ReassociationIndices ri) {
+            llvm::interleaveComma(ri, llvm::dbgs() << "|");
+          });
+      DBGSNL();
+      llvm::interleaveComma(stripMinedShape, DBGS() << "stripMinedShape: ");
+      DBGSNL(); DBGS() << "collapsed type: " << collapsedType; DBGSNL(););
+
+  // 5. Collapse from the stripMinedShape to the padded result.
+  auto reshapeOp = rewriter.create<tensor::CollapseShapeOp>(
+      loc, collapsedType, transposeOp->getResult(0),
+      packingMetadata.reassociations);
+
+  // 6. ExtractSlice
+  int64_t destRank = destTensorType.getRank();
+  auto extractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
+      loc, destTensorType, reshapeOp->getResult(0),
+      SmallVector<OpFoldResult>(destRank, zero),
+      tensor::getMixedSizes(rewriter, loc, unPackOp->getResult(0)),
+      SmallVector<OpFoldResult>(destRank, one));
+
+  // 7. Replace unPackOp by extractSliceOp.
   rewriter.replaceOp(unPackOp, extractSliceOp->getResults());
 
   return LowerUnPackOpResult{emptyOp, transposeOp, reshapeOp, extractSliceOp};
