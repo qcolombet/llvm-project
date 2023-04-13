@@ -816,18 +816,14 @@ static FailureOr<LowerPackResult> lowerPack(RewriterBase &rewriter,
   if (packOp.isLikePad()) {
     // This pack is just a plain pad.
     // Just insert the pad in the higher ranked tensor.
-    ArrayRef<int64_t> origShape = collapsed.getShape();
     auto emptyOp =
         rewriter.create<tensor::EmptyOp>(loc, packedTensorType, ValueRange{});
-    // offsets.
+    // Offsets.
     SmallVector<OpFoldResult> zeros(packedRank, rewriter.getIndexAttr(0));
     // Strides.
-    OpFoldResult one = rewriter.getIndexAttr(1);
-    SmallVector<OpFoldResult> ones(packedRank, one);
-    // The inner dimensions stay the same, but the outer ones are additional 1s.
-    SmallVector<OpFoldResult> sizes(packedRank - origShape.size(), one);
-    for (int64_t dstSize : origShape)
-      sizes.push_back(rewriter.getIndexAttr(dstSize));
+    SmallVector<OpFoldResult> ones(packedRank, rewriter.getIndexAttr(1));
+    SmallVector<OpFoldResult> sizes =
+        getMixedDimensions(rewriter, loc, packOp.getDest());
 
     auto insertSliceOp = rewriter.create<tensor::InsertSliceOp>(
         loc, /*source=*/padOp, /*dest=*/emptyOp,
@@ -915,17 +911,19 @@ static FailureOr<LowerUnPackOpResult> lowerUnPack(RewriterBase &rewriter,
   OpFoldResult zero = rewriter.getIndexAttr(0), one = rewriter.getIndexAttr(1);
   auto destTensorType = unPackOp.getDest().getType().cast<RankedTensorType>();
   if (unPackOp.isLikeUnPad()) {
-    // This unpack is just a plain pad.
-    // Just extract the pad from the higher ranked tensor.
+    // This unpack is just a plain unpad.
+    // Just extract the slice from the higher ranked tensor.
     ArrayRef<int64_t> destShape = destTensorType.getShape();
+    // The inner dimensions stay the same as the destination tensor, but the
+    // outer ones are additional 1s.
     SmallVector<OpFoldResult> sizes(packedRank - destShape.size(), one);
-    for (int64_t dstSize : destShape) {
-      sizes.push_back(rewriter.getIndexAttr(dstSize));
-    }
+    sizes.append(getMixedDimensions(rewriter, loc, unPackOp.getDest()));
+
     auto extractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
         loc, destTensorType, unPackOp.getSource(),
         SmallVector<OpFoldResult>(packedRank, zero), sizes,
         SmallVector<OpFoldResult>(packedRank, one));
+
     rewriter.replaceOp(unPackOp, extractSliceOp->getResults());
 
     return LowerUnPackOpResult{/*emptyOp=*/nullptr, /*transposeOp=*/nullptr,
