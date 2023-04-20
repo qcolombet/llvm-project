@@ -342,6 +342,13 @@ struct AssumeAlignmentOpLowering
 
     MemRefDescriptor memRefDescriptor(memref);
     Value ptr = memRefDescriptor.alignedPtr(rewriter, memref.getLoc());
+    Value offset = memRefDescriptor.offset(rewriter, memref.getLoc());
+    if (!isConstantIntValue(offset, 0)) {
+      Type elementPtrType = memRefDescriptor.getElementPtrType();
+      Type elementType = typeConverter->convertType(elementPtrType);
+      ptr = rewriter.create<LLVM::GEPOp>(loc, ptr.getType(), elementType, ptr,
+                                         offset);
+    }
 
     // Emit llvm.assume(memref.alignedPtr & (alignment - 1) == 0). Notice that
     // the asserted memref.alignedPtr isn't used anywhere else, as the real
