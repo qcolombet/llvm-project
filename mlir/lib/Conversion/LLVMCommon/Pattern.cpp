@@ -10,6 +10,7 @@
 #include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
@@ -72,14 +73,22 @@ Value ConvertToLLVMPattern::getStridedElementPtr(
   auto [strides, offset] = getStridesAndOffset(type);
 
   MemRefDescriptor memRefDescriptor(memRefDesc);
+  // FIXME: This should be implemented only once in the memrefbuilder.
   Value base = memRefDescriptor.alignedPtr(rewriter, loc);
 
-  Value index;
-  if (offset != 0) // Skip if offset is zero.
-    index = ShapedType::isDynamic(offset)
-                ? memRefDescriptor.offset(rewriter, loc)
-                : createIndexConstant(rewriter, loc, offset);
+  Type elementPtrType = memRefDescriptor.getElementPtrType();
+  Type elementType = getTypeConverter()->convertType(type.getElementType());
 
+  Value offsetVal = memRefDescriptor.offset(rewriter, loc);
+  // This lowering needs to be exactly the same as MemRefToLLVM for CSE to apply
+  // and instcombine to connect the information with the llvm.assume attached to
+  // the buffers.
+  if (!isConstantIntValue(offsetVal, 0)) {
+    base = rewriter.create<LLVM::GEPOp>(loc, base.getType(), elementType, base,
+                                        offsetVal);
+  }
+
+  Value index;
   for (int i = 0, e = indices.size(); i < e; ++i) {
     Value increment = indices[i];
     if (strides[i] != 1) { // Skip if stride is 1.
@@ -92,11 +101,8 @@ Value ConvertToLLVMPattern::getStridedElementPtr(
         index ? rewriter.create<LLVM::AddOp>(loc, index, increment) : increment;
   }
 
-  Type elementPtrType = memRefDescriptor.getElementPtrType();
-  return index ? rewriter.create<LLVM::GEPOp>(
-                     loc, elementPtrType,
-                     getTypeConverter()->convertType(type.getElementType()),
-                     base, index)
+  return index ? rewriter.create<LLVM::GEPOp>(loc, elementPtrType, elementType,
+                                              base, index)
                : base;
 }
 
