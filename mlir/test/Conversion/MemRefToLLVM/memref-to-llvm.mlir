@@ -145,6 +145,20 @@ func.func @assume_alignment(%0 : memref<4x4xf16>) {
 
 // -----
 
+// CHECK-LABEL: func @assume_alignment_w_offset
+func.func @assume_alignment_offset(%0 : memref<4x4xf16, strided<[?, ?], offset: ?>>) {
+  // CHECK: %[[PTR:.*]] = llvm.extractvalue %[[MEMREF:.*]][1] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)>
+  // CHECK-NEXT: %[[ZERO:.*]] = llvm.mlir.constant(0 : index) : i64
+  // CHECK-NEXT: %[[MASK:.*]] = llvm.mlir.constant(15 : index) : i64
+  // CHECK-NEXT: %[[INT:.*]] = llvm.ptrtoint %[[PTR]] : !llvm.ptr to i64
+  // CHECK-NEXT: %[[MASKED_PTR:.*]] = llvm.and %[[INT]], %[[MASK:.*]] : i64
+  // CHECK-NEXT: %[[CONDITION:.*]] = llvm.icmp "eq" %[[MASKED_PTR]], %[[ZERO]] : i64
+  // CHECK-NEXT: "llvm.intr.assume"(%[[CONDITION]]) : (i1) -> ()
+  memref.assume_alignment %0, 16 : memref<4x4xf16, strided<[?, ?], offset: ?>>
+  return
+}
+// -----
+
 // CHECK-LABEL: func @dim_of_unranked
 // CHECK32-LABEL: func @dim_of_unranked
 func.func @dim_of_unranked(%unranked: memref<*xi32>) -> index {
