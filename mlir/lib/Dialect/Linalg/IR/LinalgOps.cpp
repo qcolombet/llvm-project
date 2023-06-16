@@ -168,11 +168,11 @@ parseCommonStructuredOpParts(OpAsmParser &parser, OperationState &result,
 
   if (addOperandSegmentSizes) {
     // This is a bit complex because we're trying to be backward compatible with
-    // operation syntax that mix the inherent attributes and the discardable ones
-    // in the same dictionary.
-    // If the properties are used, we append the operand_segment_sizes there directly.
-    // Otherwise we append it to the discardable attributes dictionary where it is
-    // handled by the generic Operation::create(...) method.
+    // operation syntax that mix the inherent attributes and the discardable
+    // ones ones in the same dictionary. If the properties are used, we append
+    // the operand_segment_sizes there directly. Otherwise we append it to the
+    // discardable attributes dictionary where it is handled by the generic
+    // Operation::create(...) method.
     if (result.propertiesAttr) {
       NamedAttrList attrs = llvm::cast<DictionaryAttr>(result.propertiesAttr);
       attrs.append("operand_segment_sizes",
@@ -2046,8 +2046,7 @@ static void createNewOperandWithStaticSizes(
   for (unsigned i = 0; i < sourceShape.size(); i++) {
     int64_t dimShape = sourceShape[i];
     AffineExpr dimExpr = sourceMap.getResult(i);
-    if (!affineExprToSize.contains(dimExpr) ||
-        !sourceType.isDynamicDim(i)) {
+    if (!affineExprToSize.contains(dimExpr) || !sourceType.isDynamicDim(i)) {
       newShape.push_back(dimShape);
       continue;
     }
@@ -2139,6 +2138,41 @@ struct InferStaticShapeOfOperands : public OpInterfaceRewritePattern<LinalgOp> {
 
 // All named ops canonicalizers and folders are auto-generated in the
 // .cpp.inc.
+
+//===----------------------------------------------------------------------===//
+// SoftmaxOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult SoftmaxOp::verify() {
+  Operation *op = getOperation();
+  auto inputType = input().getType().cast<ShapedType>();
+  auto outputType = output().getType().cast<ShapedType>();
+
+  ArrayRef<int64_t> inputShape = inputType.getShape();
+  ArrayRef<int64_t> outputShape = outputType.getShape();
+  if (!areShapesCompatible(inputShape, outputShape))
+    return op->emitOpError("incompatible output shape");
+
+  int64_t inputRank = getInputOperandRank();
+  int64_t dimension = getDimension();
+  if ((dimension < 0) || (dimension >= inputRank))
+    return op->emitOpError("incorrect dimension specified");
+
+  return success();
+}
+
+LogicalResult
+SoftmaxOp::reifyResultShapes(OpBuilder &b,
+                             ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return cast<LinalgExtOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
+}
+
+void SoftmaxOp::build(OpBuilder &builder, OperationState &state, Value source,
+                      Value output, int64_t dimension) {
+  build(builder, state, TypeRange({output.getType()}), ValueRange(source),
+        ValueRange(output), dimension);
+}
 
 //===----------------------------------------------------------------------===//
 // LinalgDialect
