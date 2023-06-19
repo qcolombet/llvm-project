@@ -15,6 +15,7 @@
 
 include "mlir/Dialect/Linalg/IR/LinalgBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/LoopLikeInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
@@ -88,10 +89,8 @@ def Linalg_IndexOp : Linalg_Op<"index", [Pure]>,
 }
 
 
-class CheckNumOperands<int i> : CPred<"$_op.getNumOperands() == " # i>;
-
 def Linalg_SoftmaxOp : Linalg_Op<"softmax",
-    [PredOpTrait<"only one input and one output",  CheckNumOperands<2>>,
+    [DestinationStyleOpInterface,
      PredOpTrait<"input and output have same element type", TCopVTEtIsSameAs<0, 1>>,
      DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface>]> {
   let summary = "Softmax operator";
@@ -106,35 +105,29 @@ def Linalg_SoftmaxOp : Linalg_Op<"softmax",
 
     This is an aggregate linalg operation that further reduces to a small DAG of
     structured operations.
-    It implements
   }];
 
-  let arguments = (ins Variadic<AnyShaped>:$inputs,
-                       Variadic<AnyShaped>:$outputs,
+  let arguments = (ins AnyShaped:$input,
+                       AnyShaped:$output,
                        I64Attr:$dimension
   );
-
-  let builders = [
-    OpBuilder<(ins "Value":$inputs, "Value":$outputs,
-      CArg<"int64_t", "0">:$dimension)>
-  ];
 
   let results = (outs Variadic<AnyRankedTensor>:$result);
   let hasFolder = 1;
   let assemblyFormat = [{
     attr-dict
     `dimension` `(` $dimension `)`
-    `ins` `(` $inputs `:` type($inputs) `)`
-    `outs` `(` $outputs `:` type($outputs) `)`
+    `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
     (`->` type($result)^)?
   }];
 
-  let extraClassDeclaration = extraLinalgExtOpClassDeclaration # [{
+  let extraClassDeclaration = [{
     Value input() {
-      return getInputOperand(0)->get();
+      return getInput();
     }
     Value output() {
-      return getOutputOperand(0)->get();
+      return getOutput();
     }
     ShapedType getInputOperandType() {
       return input().getType().cast<ShapedType>();
@@ -158,6 +151,7 @@ def Linalg_SoftmaxOp : Linalg_Op<"softmax",
           outputsIndexAndLength.first + outputsIndexAndLength.second);
     }
   }];
+  let hasVerifier = 1;
 }
 
 #endif // LINALG_OPS

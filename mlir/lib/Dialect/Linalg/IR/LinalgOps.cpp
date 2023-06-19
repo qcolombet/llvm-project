@@ -2150,7 +2150,7 @@ LogicalResult SoftmaxOp::verify() {
 
   ArrayRef<int64_t> inputShape = inputType.getShape();
   ArrayRef<int64_t> outputShape = outputType.getShape();
-  if (!areShapesCompatible(inputShape, outputShape))
+  if (failed(verifyCompatibleShape(inputShape, outputShape)))
     return op->emitOpError("incompatible output shape");
 
   int64_t inputRank = getInputOperandRank();
@@ -2161,17 +2161,15 @@ LogicalResult SoftmaxOp::verify() {
   return success();
 }
 
+LogicalResult SoftmaxOp::fold(FoldAdaptor, SmallVectorImpl<OpFoldResult> &) {
+  return memref::foldMemRefCast(*this);
+}
+
 LogicalResult
 SoftmaxOp::reifyResultShapes(OpBuilder &b,
                              ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return cast<LinalgExtOp>(getOperation())
+  return cast<LinalgOp>(getOperation())
       .reifyResultShapes(b, reifiedReturnShapes);
-}
-
-void SoftmaxOp::build(OpBuilder &builder, OperationState &state, Value source,
-                      Value output, int64_t dimension) {
-  build(builder, state, TypeRange({output.getType()}), ValueRange(source),
-        ValueRange(output), dimension);
 }
 
 //===----------------------------------------------------------------------===//

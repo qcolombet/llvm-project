@@ -613,4 +613,3 @@ func.func @softmax(%arg0: tensor<2x16x32xf32>) -> tensor<2x16x32xf32> {
 // CHECK-SAME:     tensor<2x16x32xf32>) -> tensor<2x16x32xf32>
 // CHECK:        return %[[D1]] : tensor<2x16x32xf32>
 // CHECK:      }
-
