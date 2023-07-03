@@ -33,6 +33,7 @@
 #include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "mlir/Interfaces/AggregatedOpInterface.h"
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/TypeID.h"
@@ -233,6 +234,29 @@ transform::DecomposeOp::applyToOne(transform::TransformRewriter &rewriter,
 #undef DOWNSCALE_NORMAL
 #undef DOWNSCALE_CALL
 #undef DOWNSCALE
+  return emitDefaultSilenceableFailure(target);
+}
+
+/// Quick impl.
+DiagnosedSilenceableFailure transform::DecomposeInterfaceOp::applyToOne(
+    transform::TransformRewriter &rewriter, Operation *target,
+    transform::ApplyToEachResultList &results,
+    transform::TransformState &state) {
+  auto decomposableOp = dyn_cast<AggregatedOpInterface>(target);
+  if (!decomposableOp) {
+    failed(
+        rewriter.notifyMatchFailure(target, "payload is not a decomposable"));
+    return emitDefaultSilenceableFailure(target);
+  }
+
+  FailureOr<SmallVector<Value>> maybeNewResults =
+      decomposableOp.decomposeOperation(rewriter);
+  if (succeeded(maybeNewResults)) {
+    rewriter.replaceOp(decomposableOp, *maybeNewResults);
+    // FIXME: Quick hack to connect things.
+    results.push_back((*maybeNewResults)[0].getDefiningOp());
+    return DiagnosedSilenceableFailure::success();
+  }
   return emitDefaultSilenceableFailure(target);
 }
 
