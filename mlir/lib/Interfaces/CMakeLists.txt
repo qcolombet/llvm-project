@@ -1,5 +1,4 @@
 set(LLVM_OPTIONAL_SOURCES
-  AggregatedOpInterface.cpp
   CallInterfaces.cpp
   CastInterfaces.cpp
   ControlFlowInterfaces.cpp
@@ -37,7 +36,6 @@ function(add_mlir_interface_library name)
 endfunction(add_mlir_interface_library)
 
 
-add_mlir_interface_library(AggregatedOpInterface)
 add_mlir_interface_library(CallInterfaces)
 add_mlir_interface_library(CastInterfaces)
 add_mlir_interface_library(ControlFlowInterfaces)

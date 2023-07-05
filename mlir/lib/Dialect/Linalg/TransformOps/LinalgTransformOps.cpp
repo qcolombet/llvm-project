@@ -33,7 +33,6 @@
 #include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
-#include "mlir/Interfaces/AggregatedOpInterface.h"
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/TypeID.h"
@@ -237,27 +236,36 @@ transform::DecomposeOp::applyToOne(transform::TransformRewriter &rewriter,
   return emitDefaultSilenceableFailure(target);
 }
 
-/// Quick impl.
+//===----------------------------------------------------------------------===//
+// DecomposeInterfaceOp
+//===----------------------------------------------------------------------===//
+
+// Decompose the target operation if it implements the AggregatedOpInterface.
+// Push the decomposed operations (the ones that replaces the values produced by
+// \p target) in the `results`.
 DiagnosedSilenceableFailure transform::DecomposeInterfaceOp::applyToOne(
     transform::TransformRewriter &rewriter, Operation *target,
     transform::ApplyToEachResultList &results,
     transform::TransformState &state) {
   auto decomposableOp = dyn_cast<AggregatedOpInterface>(target);
   if (!decomposableOp) {
-    failed(
-        rewriter.notifyMatchFailure(target, "payload is not a decomposable"));
+    failed(rewriter.notifyMatchFailure(target,
+                                       "payload is not a decomposable op"));
     return emitDefaultSilenceableFailure(target);
   }
 
   FailureOr<SmallVector<Value>> maybeNewResults =
       decomposableOp.decomposeOperation(rewriter);
-  if (succeeded(maybeNewResults)) {
-    rewriter.replaceOp(decomposableOp, *maybeNewResults);
-    // FIXME: Quick hack to connect things.
-    results.push_back((*maybeNewResults)[0].getDefiningOp());
-    return DiagnosedSilenceableFailure::success();
+  if (failed(maybeNewResults))
+    return emitDefaultSilenceableFailure(target);
+
+  rewriter.replaceOp(decomposableOp, *maybeNewResults);
+  for (Value val : *maybeNewResults) {
+    Operation *definition = val.getDefiningOp();
+    if (definition)
+      results.push_back(definition);
   }
-  return emitDefaultSilenceableFailure(target);
+  return DiagnosedSilenceableFailure::success();
 }
 
 //===----------------------------------------------------------------------===//
