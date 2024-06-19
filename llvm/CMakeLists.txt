@@ -411,6 +411,7 @@ set(LLVM_ALL_TARGETS
   ARM
   AVR
   BPF
+  H2BLB
   Hexagon
   Lanai
   Mips
